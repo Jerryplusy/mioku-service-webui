@@ -402,6 +402,13 @@ async function fetchYiyan(): Promise<{ text: string }> {
   }
 }
 
+function normalizeVersionSpec(input: string): string {
+  if (!input || input === "unknown") return "unknown";
+  const cleaned = input.trim().replace(/^[~^<>=\s]+/, "");
+  const matched = cleaned.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
+  return matched?.[0] || cleaned;
+}
+
 async function getBotDetails(bot: any): Promise<Record<string, any>> {
   const base = {
     botId: bot?.bot_id || bot?.uin || 0,
@@ -474,8 +481,6 @@ export async function getSystemOverview(): Promise<Record<string, any>> {
     ? path.join(process.cwd(), "mioku-webui", "package.json")
     : path.join(process.cwd(), "webui", "package.json");
 
-  const saying = await fetchYiyan();
-
   return {
     uptimeSeconds: process.uptime(),
     bots,
@@ -504,15 +509,18 @@ export async function getSystemOverview(): Promise<Record<string, any>> {
       nodeVersion: process.version,
     },
     versions: {
-      mioki: rootPkg?.dependencies?.mioki || "unknown",
+      mioki: normalizeVersionSpec(rootPkg?.dependencies?.mioki || rootPkg?.devDependencies?.mioki || "unknown"),
       mioku: rootPkg?.version || "unknown",
       webui: readPackageVersion(webuiPkgPath),
       webuiService: readPackageVersion(path.join(process.cwd(), "src", "services", "webui", "package.json")),
     },
     plugins: listManagedPackages("plugin"),
     services: listManagedPackages("service"),
-    saying,
   };
+}
+
+export async function getSaying(): Promise<{ text: string }> {
+  return fetchYiyan();
 }
 
 export function getChatConfig(fileName: string): any {

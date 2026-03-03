@@ -1,6 +1,6 @@
 {
   "name": "mioku-service-webui",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Mioku WebUI 服务",
   "main": "index.ts",
   "dependencies": {

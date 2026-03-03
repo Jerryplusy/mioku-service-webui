@@ -35,6 +35,7 @@ import {
   updateWebUISettings,
   checkUpdate,
   getChatConfig,
+  getSaying,
   removeManagedPackage,
 } from "./system";
 import { CHAT_CONFIG_DIR, CHAT_DATA_DIR, LOGS_DIR, WEBUI_DIST } from "./utils";
@@ -109,8 +110,14 @@ class WebUIRuntime {
       return c.json({ ok: true, data: settings });
     });
 
-    this.app.get("/api/overview", (c) => {
-      return getSystemOverview().then((data) => c.json({ ok: true, data }));
+    this.app.get("/api/overview", async (c) => {
+      const data = await getSystemOverview();
+      return c.json({ ok: true, data });
+    });
+    this.app.get("/api/saying", async (c) => {
+      this.logAction("saying.fetch");
+      const data = await getSaying();
+      return c.json({ ok: true, data });
     });
 
     this.app.get("/api/plugins", (c) =>
@@ -461,7 +468,7 @@ const runtime = new WebUIRuntime();
 
 const webUIService: MiokuService = {
   name: "webui",
-  version: "1.0.1",
+  version: "1.0.2",
   description: "Mioku WebUI 管理服务",
   api: {
     getSettings: () => getWebUISettings(),
