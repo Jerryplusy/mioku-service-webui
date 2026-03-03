@@ -6,7 +6,12 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createNodeWebSocket } from "@hono/node-ws";
 import type { MiokuService } from "../../core/types";
-import type { InstallRequest, RemoveRequest, UpdateRequest, WebUISettings } from "./types";
+import type {
+  InstallRequest,
+  RemoveRequest,
+  UpdateRequest,
+  WebUISettings,
+} from "./types";
 import { ensureAuthConfig, loginWithToken, requireAuth } from "./auth";
 import {
   deleteMessagesByRange,
@@ -43,19 +48,45 @@ class WebUIRuntime {
   private app = new Hono();
   private server: ReturnType<typeof serve> | null = null;
 
+  private logAction(action: string, payload?: unknown): void {
+    const text = payload ? ` | ${JSON.stringify(payload)}` : "";
+    logger.info(`[webui-action] ${action}${text}`);
+  }
+
   public initRoutes(): void {
     const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({
       app: this.app,
+    });
+
+    this.app.onError((err, c) => {
+      logger.error(`webui-service API error: ${err.message}`);
+      return c.json(
+        {
+          ok: false,
+          error: err.message || "INTERNAL_SERVER_ERROR",
+        },
+        500,
+      );
+    });
+
+    this.app.notFound((c) => {
+      if (c.req.path.startsWith("/api/")) {
+        return c.json({ ok: false, error: "API_NOT_FOUND" }, 404);
+      }
+      return c.text("Not Found", 404);
     });
 
     this.app.get("/api/health", (c) => c.json({ ok: true, service: "webui" }));
 
     this.app.post("/api/auth/login", async (c) => {
       const body = await c.req.json().catch(() => ({}));
+      this.logAction("auth.login.attempt");
       const result = loginWithToken(String(body?.token || ""));
       if (!result.ok) {
+        this.logAction("auth.login.failed");
         return c.json({ ok: false, error: "TOKEN_INVALID" }, 401);
       }
+      this.logAction("auth.login.success", { expiresAt: result.expiresAt });
       return c.json({ ok: true, expiresAt: result.expiresAt });
     });
 
@@ -73,51 +104,89 @@ class WebUIRuntime {
 
     this.app.put("/api/settings", async (c) => {
       const body = await c.req.json();
+      this.logAction("settings.update", body ?? {});
       const settings = updateWebUISettings(body ?? {});
       return c.json({ ok: true, data: settings });
     });
 
     this.app.get("/api/overview", (c) => {
-      return c.json({ ok: true, data: getSystemOverview() });
+      return getSystemOverview().then((data) => c.json({ ok: true, data }));
     });
 
-    this.app.get("/api/plugins", (c) => c.json({ ok: true, data: listManagedPackages("plugin") }));
-    this.app.get("/api/services", (c) => c.json({ ok: true, data: listManagedPackages("service") }));
+    this.app.get("/api/plugins", (c) =>
+      c.json({ ok: true, data: listManagedPackages("plugin") }),
+    );
+    this.app.get("/api/services", (c) =>
+      c.json({ ok: true, data: listManagedPackages("service") }),
+    );
 
     this.app.post("/api/manage/install", async (c) => {
       const body = (await c.req.json()) as InstallRequest;
+      this.logAction("manage.install", {
+        target: body.target,
+        repoUrl: body.repoUrl,
+        packageManager: body.packageManager,
+      });
       const result = await installManagedPackage(body);
       return c.json(result);
     });
 
     this.app.post("/api/manage/check-update", async (c) => {
-      const body = (await c.req.json()) as { name: string; target: "plugin" | "service" };
+      const body = (await c.req.json()) as {
+        name: string;
+        target: "plugin" | "service";
+      };
+      this.logAction("manage.check-update", body);
       const result = await checkUpdate(body.name, body.target);
       return c.json(result);
     });
 
     this.app.post("/api/manage/update", async (c) => {
       const body = (await c.req.json()) as UpdateRequest;
+      this.logAction("manage.update", body);
       const result = await updateManagedPackage(body);
       return c.json(result);
     });
 
     this.app.post("/api/manage/remove", async (c) => {
       const body = (await c.req.json()) as RemoveRequest;
+      this.logAction("manage.remove", body);
       const result = await removeManagedPackage(body);
       return c.json(result);
     });
 
-    this.app.get("/api/ai/base", (c) => c.json({ ok: true, data: getChatConfig("base.json") }));
-    this.app.put("/api/ai/base", async (c) => c.json({ ok: true, data: updateChatConfig("base.json", await c.req.json()) }));
-
-    this.app.get("/api/ai/personalization", (c) => c.json({ ok: true, data: getChatConfig("personalization.json") }));
-    this.app.put("/api/ai/personalization", async (c) =>
-      c.json({ ok: true, data: updateChatConfig("personalization.json", await c.req.json()) }),
+    this.app.get("/api/ai/base", (c) =>
+      c.json({ ok: true, data: getChatConfig("base.json") }),
     );
+    this.app.put("/api/ai/base", async (c) => {
+      const body = await c.req.json();
+      this.logAction("ai.base.update");
+      return c.json({ ok: true, data: updateChatConfig("base.json", body) });
+    });
 
-    this.app.get("/api/ai/settings", (c) => c.json({ ok: true, data: getChatConfig("settings.json") }));
-    this.app.put("/api/ai/settings", async (c) => c.json({ ok: true, data: updateChatConfig("settings.json", await c.req.json()) }));
+    this.app.get("/api/ai/personalization", (c) =>
+      c.json({ ok: true, data: getChatConfig("personalization.json") }),
+    );
+    this.app.put("/api/ai/personalization", async (c) => {
+      const body = await c.req.json();
+      this.logAction("ai.personalization.update");
+      return c.json({
+        ok: true,
+        data: updateChatConfig("personalization.json", body),
+      });
+    });
+
+    this.app.get("/api/ai/settings", (c) =>
+      c.json({ ok: true, data: getChatConfig("settings.json") }),
+    );
+    this.app.put("/api/ai/settings", async (c) => {
+      const body = await c.req.json();
+      this.logAction("ai.settings.update");
+      return c.json({
+        ok: true,
+        data: updateChatConfig("settings.json", body),
+      });
+    });
 
     this.app.get("/api/ai/instances", (c) => {
       const names = aiService?.api?.list?.() ?? [];
@@ -126,6 +195,11 @@ class WebUIRuntime {
 
     this.app.post("/api/ai/instances", async (c) => {
       const body = await c.req.json();
+      this.logAction("ai.instance.create", {
+        name: body?.name,
+        apiUrl: body?.apiUrl,
+        modelType: body?.modelType,
+      });
       if (!aiService?.api?.create) {
         return c.json({ ok: false, error: "AI_SERVICE_UNAVAILABLE" }, 503);
       }
@@ -141,12 +215,14 @@ class WebUIRuntime {
 
     this.app.delete("/api/ai/instances/:name", (c) => {
       const name = c.req.param("name");
+      this.logAction("ai.instance.remove", { name });
       const ok = aiService?.api?.remove?.(name);
       return c.json({ ok: Boolean(ok) });
     });
 
     this.app.post("/api/ai/default/:name", (c) => {
       const name = c.req.param("name");
+      this.logAction("ai.instance.set-default", { name });
       const ok = aiService?.api?.setDefault?.(name);
       return c.json({ ok: Boolean(ok) });
     });
@@ -163,7 +239,9 @@ class WebUIRuntime {
       });
     });
 
-    this.app.get("/api/meme/tree", (c) => c.json({ ok: true, data: listMemeTree() }));
+    this.app.get("/api/meme/tree", (c) =>
+      c.json({ ok: true, data: listMemeTree() }),
+    );
 
     this.app.post("/api/meme/upload", async (c) => {
       const form = await c.req.formData();
@@ -181,6 +259,7 @@ class WebUIRuntime {
       const filePath = path.join(dir, fileName);
       const buffer = Buffer.from(await file.arrayBuffer());
       fs.writeFileSync(filePath, buffer);
+      this.logAction("meme.upload", { character, emotion, fileName });
 
       return c.json({ ok: true, path: path.relative(process.cwd(), filePath) });
     });
@@ -192,6 +271,7 @@ class WebUIRuntime {
         return c.json({ ok: false, error: "NOT_FOUND" }, 404);
       }
       fs.unlinkSync(filePath);
+      this.logAction("meme.delete", { path: body.path });
       return c.json({ ok: true });
     });
 
@@ -205,10 +285,13 @@ class WebUIRuntime {
       const configName = c.req.param("config");
       const body = await c.req.json();
       savePluginConfig(pluginName, configName, body);
+      this.logAction("plugin-config.update", { pluginName, configName });
       return c.json({ ok: true });
     });
 
-    this.app.get("/api/db/tables", (c) => c.json({ ok: true, data: listTables() }));
+    this.app.get("/api/db/tables", (c) =>
+      c.json({ ok: true, data: listTables() }),
+    );
 
     this.app.get("/api/db/messages", (c) => {
       const q = c.req.query();
@@ -225,20 +308,31 @@ class WebUIRuntime {
       return c.json({ ok: true, data });
     });
 
-    this.app.get("/api/db/stats", (c) => c.json({ ok: true, data: getStats() }));
+    this.app.get("/api/db/stats", (c) =>
+      c.json({ ok: true, data: getStats() }),
+    );
 
     this.app.put("/api/db/message", async (c) => {
       const body = await c.req.json();
+      this.logAction("db.message.update", {
+        table: body?.table,
+        idField: body?.idField,
+        id: body?.id,
+      });
       return c.json({ ok: true, data: updateMessage(body) });
     });
 
     this.app.post("/api/db/cleanup", async (c) => {
       const body = await c.req.json();
+      this.logAction("db.cleanup", body);
       return c.json({ ok: true, data: deleteMessagesByRange(body) });
     });
 
     this.app.get("/api/db/export", (c) => {
-      const format = (c.req.query("format") === "csv" ? "csv" : "json") as "json" | "csv";
+      const format = (c.req.query("format") === "csv" ? "csv" : "json") as
+        | "json"
+        | "csv";
+      this.logAction("db.export", { format });
       const result = exportData(format);
       return c.json({ ok: true, data: result });
     });
@@ -254,6 +348,7 @@ class WebUIRuntime {
       fs.mkdirSync(backupDir, { recursive: true });
       const fullPath = path.join(backupDir, `${Date.now()}-${file.name}`);
       fs.writeFileSync(fullPath, Buffer.from(await file.arrayBuffer()));
+      this.logAction("db.import", { fileName: file.name });
 
       const result = importDataFromJson(fullPath);
       return c.json({ ok: true, data: result });
@@ -293,24 +388,39 @@ class WebUIRuntime {
       }),
     );
 
-    this.app.get("/meme/*", serveStatic({ root: process.cwd(), rewriteRequestPath: (p) => p.replace(/^\/meme\//, "data/chat/meme/") }));
+    this.app.get(
+      "/meme/*",
+      serveStatic({
+        root: process.cwd(),
+        rewriteRequestPath: (p) => p.replace(/^\/meme\//, "data/chat/meme/"),
+      }),
+    );
 
     this.app.use("/assets/*", serveStatic({ root: WEBUI_DIST }));
     this.app.use("/favicon.ico", serveStatic({ root: WEBUI_DIST }));
     this.app.get("*", async (c) => {
       const indexPath = path.join(WEBUI_DIST, "index.html");
       if (!fs.existsSync(indexPath)) {
-        return c.text("WebUI frontend not built yet. Please run: npm run webui:build", 503);
+        return c.text(
+          "WebUI frontend not built yet. Please run: npm run webui:build",
+          503,
+        );
       }
       const content = await fs.promises.readFile(indexPath, "utf-8");
       return c.html(content);
     });
 
     const settings = getWebUISettings();
-    const server = serve({ fetch: this.app.fetch, port: settings.port, hostname: settings.host });
+    const server = serve({
+      fetch: this.app.fetch,
+      port: settings.port,
+      hostname: settings.host,
+    });
     this.server = server;
     injectWebSocket(server);
-    logger.info(`webui-service 已启动: http://${settings.host}:${settings.port}`);
+    logger.info(
+      `webui-service 已启动: http://${settings.host}:${settings.port}`,
+    );
   }
 
   public readLatestLogs(count: number): string[] {
@@ -332,7 +442,10 @@ class WebUIRuntime {
       return [];
     }
 
-    const lines = fs.readFileSync(file.fullPath, "utf-8").split(/\r?\n/).filter(Boolean);
+    const lines = fs
+      .readFileSync(file.fullPath, "utf-8")
+      .split(/\r?\n/)
+      .filter(Boolean);
     return lines.slice(-count);
   }
 
@@ -348,7 +461,7 @@ const runtime = new WebUIRuntime();
 
 const webUIService: MiokuService = {
   name: "webui",
-  version: "1.0.0",
+  version: "1.0.1",
   description: "Mioku WebUI 管理服务",
   api: {
     getSettings: () => getWebUISettings(),

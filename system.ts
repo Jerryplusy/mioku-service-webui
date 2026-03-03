@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
+import { connectedBots, systemInfo } from "mioki";
 import type { InstallRequest, ManagedTarget, PackageManager, RemoveRequest, UpdateRequest, WebUISettings } from "./types";
 import {
   CHAT_CONFIG_DIR,
@@ -21,8 +22,45 @@ import {
   writeJsonFile,
 } from "./utils";
 
+interface NapcatNodeConfig {
+  name?: string;
+  host?: string;
+  port?: number;
+  token?: string;
+  protocol?: string;
+}
+
+interface MiokiRuntimeConfig {
+  mioki?: {
+    napcat?: NapcatNodeConfig[];
+    [key: string]: any;
+  };
+  [key: string]: any;
+}
+
 function getTargetRoot(target: ManagedTarget): string {
   return target === "plugin" ? PLUGINS_DIR : SERVICES_DIR;
+}
+
+function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>): T {
+  const result = { ...target };
+  for (const key in source) {
+    const sourceValue = source[key];
+    const targetValue = result[key];
+    if (
+      sourceValue &&
+      typeof sourceValue === "object" &&
+      !Array.isArray(sourceValue) &&
+      targetValue &&
+      typeof targetValue === "object" &&
+      !Array.isArray(targetValue)
+    ) {
+      result[key] = deepMerge(targetValue, sourceValue);
+    } else if (sourceValue !== undefined) {
+      result[key] = sourceValue as any;
+    }
+  }
+  return result;
 }
 
 function readPackageJson(dir: string): any {
@@ -256,31 +294,224 @@ export async function removeManagedPackage(input: RemoveRequest): Promise<Record
   };
 }
 
-export function getSystemOverview(): Record<string, any> {
-  const upSeconds = process.uptime();
-  const memoryUsage = process.memoryUsage();
+function readPackageVersion(filePath: string): string {
+  try {
+    if (!fs.existsSync(filePath)) return "unknown";
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    return parsed?.version || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function getSystemInformationSnapshot(): Promise<{
+  diskUsagePercent: number;
+  diskTotal: number;
+  diskUsed: number;
+  netRxPerSec: number;
+  netTxPerSec: number;
+}> {
+  try {
+    const [fsSize, netStats] = await Promise.all([
+      systemInfo.fsSize().catch(() => [] as any[]),
+      systemInfo.networkStats().catch(() => [] as any[]),
+    ]);
+
+    const disk = Array.isArray(fsSize) && fsSize.length > 0 ? fsSize[0] : null;
+    const diskTotal = Number(disk?.size || 0);
+    const diskUsed = Number(disk?.used || 0);
+    const diskUsagePercent =
+      diskTotal > 0
+        ? Number(((diskUsed / diskTotal) * 100).toFixed(1))
+        : Number(disk?.use || 0);
+
+    const networkList = Array.isArray(netStats) ? netStats : [];
+    const netRxPerSec = networkList.reduce((acc, item) => acc + Number(item?.rx_sec || 0), 0);
+    const netTxPerSec = networkList.reduce((acc, item) => acc + Number(item?.tx_sec || 0), 0);
+
+    return {
+      diskUsagePercent: Number.isFinite(diskUsagePercent) ? diskUsagePercent : 0,
+      diskTotal,
+      diskUsed,
+      netRxPerSec: Number.isFinite(netRxPerSec) ? netRxPerSec : 0,
+      netTxPerSec: Number.isFinite(netTxPerSec) ? netTxPerSec : 0,
+    };
+  } catch {
+    return {
+      diskUsagePercent: 0,
+      diskTotal: 0,
+      diskUsed: 0,
+      netRxPerSec: 0,
+      netTxPerSec: 0,
+    };
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sampleCpuTimes() {
+  const cpus = os.cpus();
+  let idle = 0;
+  let total = 0;
+
+  for (const cpu of cpus) {
+    idle += cpu.times.idle;
+    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.irq + cpu.times.idle;
+  }
+
+  return { idle, total };
+}
+
+async function getCpuUsagePercent(): Promise<number> {
+  const start = sampleCpuTimes();
+  await sleep(180);
+  const end = sampleCpuTimes();
+  const idleDelta = end.idle - start.idle;
+  const totalDelta = end.total - start.total;
+  if (totalDelta <= 0) return 0;
+  return Number((((totalDelta - idleDelta) / totalDelta) * 100).toFixed(1));
+}
+
+function toHttpBaseUrl(bot: any): string {
+  const protocol = String(bot.options?.protocol || "ws");
+  const httpProtocol = protocol === "wss" ? "https" : "http";
+  const host = bot.options?.host || "127.0.0.1";
+  const port = bot.options?.port || 3001;
+  return `${httpProtocol}://${host}:${port}`;
+}
+
+async function fetchYiyan(): Promise<{ text: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  try {
+    const res = await fetch("https://uapis.cn/api/v1/saying", {
+      method: "GET",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP_${res.status}`);
+    }
+    const data = (await res.json()) as { text?: string };
+    return { text: data?.text || "愿每一次启动都带来新的灵感。" };
+  } catch {
+    return { text: "愿每一次启动都带来新的灵感。" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getBotDetails(bot: any): Promise<Record<string, any>> {
+  const base = {
+    botId: bot?.bot_id || bot?.uin || 0,
+    qq: bot?.uin || bot?.user_id || 0,
+    nickname: bot?.nickname || bot?.name || "Unknown Bot",
+    avatar: `https://q1.qlogo.cn/g?b=qq&nk=${bot?.uin || bot?.user_id || 0}&s=160`,
+    online: true,
+    napcatVersion: bot?.app_version || "unknown",
+    napcatApiBase: toHttpBaseUrl(bot),
+    groupCount: 0,
+    friendCount: 0,
+    onlineDurationMs: 0,
+    statusText: "online",
+  };
+
+  try {
+    const [status, versionInfo, groups, friends] = await Promise.all([
+      bot.api("get_status").catch(() => null),
+      bot.api("get_version_info").catch(() => null),
+      bot.getGroupList().catch(() => []),
+      bot.getFriendList().catch(() => []),
+    ]);
+
+    const stat = status?.stat || null;
+    const startTs = Number(stat?.start_time || 0);
+    const onlineDurationMs = startTs > 0 ? Math.max(0, Date.now() - startTs) : 0;
+    const onlineFromStatus = typeof status?.online === "boolean" ? status.online : true;
+
+    return {
+      ...base,
+      online: onlineFromStatus,
+      napcatVersion: versionInfo?.app_version || base.napcatVersion,
+      groupCount: Array.isArray(groups) ? groups.length : 0,
+      friendCount: Array.isArray(friends) ? friends.length : 0,
+      onlineDurationMs,
+      statusText: onlineFromStatus ? "online" : "offline",
+    };
+  } catch (error: any) {
+    return {
+      ...base,
+      online: false,
+      statusText: "error",
+      error: error?.message || "NAPCAT_API_ERROR",
+    };
+  }
+}
+
+export async function getSystemOverview(): Promise<Record<string, any>> {
+  const rootPkg = readRootPackageJson();
+  const cpus = os.cpus();
+  const cpuModel = cpus[0]?.model || "unknown";
+  const cpuSpeedMHz = cpus[0]?.speed || 0;
+  const cpuCores = cpus.length;
+  const cpuUsagePercent = await getCpuUsagePercent();
+
+  const totalMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  const usedMemory = Math.max(0, totalMemory - freeMemory);
+  const memoryUsagePercent = totalMemory > 0 ? Number(((usedMemory / totalMemory) * 100).toFixed(1)) : 0;
+
+  const processMemory = process.memoryUsage();
+  const processMemoryPercent = totalMemory > 0 ? Number(((processMemory.rss / totalMemory) * 100).toFixed(1)) : 0;
+  const siSnapshot = await getSystemInformationSnapshot();
+
+  const botInstances = Array.from(connectedBots.values());
+  const bots = await Promise.all(botInstances.map((bot) => getBotDetails(bot)));
+  const selectedBot = bots[0] || null;
+
+  const webuiPkgPath = fs.existsSync(path.join(process.cwd(), "mioku-webui", "package.json"))
+    ? path.join(process.cwd(), "mioku-webui", "package.json")
+    : path.join(process.cwd(), "webui", "package.json");
+
+  const saying = await fetchYiyan();
 
   return {
-    version: readRootPackageJson().version,
-    nodeVersion: process.version,
-    uptimeSeconds: upSeconds,
-    memory: {
-      rss: memoryUsage.rss,
-      heapUsed: memoryUsage.heapUsed,
-      heapTotal: memoryUsage.heapTotal,
+    uptimeSeconds: process.uptime(),
+    bots,
+    selectedBot,
+    system: {
+      cpuModel,
+      cpuSpeedMHz,
+      cpuCores,
+      cpuUsagePercent,
+      memoryTotal: totalMemory,
+      memoryUsed: usedMemory,
+      memoryFree: freeMemory,
+      memoryUsagePercent,
+      processMemoryRss: processMemory.rss,
+      processMemoryHeapUsed: processMemory.heapUsed,
+      processMemoryPercent,
+      diskUsagePercent: siSnapshot.diskUsagePercent,
+      diskTotal: siSnapshot.diskTotal,
+      diskUsed: siSnapshot.diskUsed,
+      networkRxPerSec: siSnapshot.netRxPerSec,
+      networkTxPerSec: siSnapshot.netTxPerSec,
+      osType: os.type(),
+      osPlatform: os.platform(),
+      osRelease: os.release(),
+      osVersion: typeof os.version === "function" ? os.version() : "unknown",
+      nodeVersion: process.version,
     },
-    cpu: {
-      cores: os.cpus().length,
-      loadavg: os.loadavg(),
-    },
-    bot: {
-      status: "running",
-      onlineAccounts: 1,
-      groups: 0,
-      friends: 0,
+    versions: {
+      mioki: rootPkg?.dependencies?.mioki || "unknown",
+      mioku: rootPkg?.version || "unknown",
+      webui: readPackageVersion(webuiPkgPath),
+      webuiService: readPackageVersion(path.join(process.cwd(), "src", "services", "webui", "package.json")),
     },
     plugins: listManagedPackages("plugin"),
     services: listManagedPackages("service"),
+    saying,
   };
 }
 
