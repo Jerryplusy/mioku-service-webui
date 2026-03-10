@@ -1,12 +1,12 @@
 {
   "name": "mioku-service-webui",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Mioku WebUI 服务",
   "main": "index.ts",
   "dependencies": {
-    "@hono/node-server": "^1.19.0",
+    "@hono/node-server": "1.19.10",
     "@hono/node-ws": "^1.2.0",
     "better-sqlite3": "^11.8.1",
-    "hono": "^4.9.8"
+    "hono": "4.12.4"
   }
 }

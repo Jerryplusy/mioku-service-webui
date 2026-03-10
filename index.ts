@@ -6,40 +6,19 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createNodeWebSocket } from "@hono/node-ws";
 import type { MiokuService } from "../../core/types";
-import type {
-  InstallRequest,
-  RemoveRequest,
-  UpdateRequest,
-  WebUISettings,
-} from "./types";
+import type { WebUISettings } from "./types";
 import { ensureAuthConfig, loginWithToken, requireAuth } from "./auth";
-import {
-  deleteMessagesByRange,
-  exportData,
-  getPluginConfigs,
-  getStats,
-  importDataFromJson,
-  listMemeTree,
-  listTables,
-  queryMessages,
-  savePluginConfig,
-  updateMessage,
-} from "./database";
-import {
-  getWebUISettings,
-  getSystemOverview,
-  installManagedPackage,
-  listManagedPackages,
-  updateChatConfig,
-  updateManagedPackage,
-  updateWebUISettings,
-  checkUpdate,
-  getChatConfig,
-  getSaying,
-  removeManagedPackage,
-} from "./system";
+import { getWebUISettings, getSystemOverview, getSaying } from "./system";
 import { CHAT_CONFIG_DIR, CHAT_DATA_DIR, LOGS_DIR, WEBUI_DIST } from "./utils";
-import aiService from "../ai";
+import {
+  createConfigRoutes,
+  createWebUISettingsRoutes,
+  createAIRoutes,
+  createDBRoutes,
+  createPluginConfigRoutes,
+  createMemeRoutes,
+  createManageRoutes,
+} from "./routes";
 
 export interface WebUIServiceAPI {
   getSettings(): WebUISettings;
@@ -98,268 +77,24 @@ class WebUIRuntime {
       return requireAuth(c, next);
     });
 
-    this.app.get("/api/settings", (c) => {
-      const settings = getWebUISettings();
-      return c.json({ ok: true, data: settings });
-    });
-
-    this.app.put("/api/settings", async (c) => {
-      const body = await c.req.json();
-      this.logAction("settings.update", body ?? {});
-      const settings = updateWebUISettings(body ?? {});
-      return c.json({ ok: true, data: settings });
-    });
-
     this.app.get("/api/overview", async (c) => {
       const data = await getSystemOverview();
       return c.json({ ok: true, data });
     });
+
     this.app.get("/api/saying", async (c) => {
       this.logAction("saying.fetch");
       const data = await getSaying();
       return c.json({ ok: true, data });
     });
 
-    this.app.get("/api/plugins", (c) =>
-      c.json({ ok: true, data: listManagedPackages("plugin") }),
-    );
-    this.app.get("/api/services", (c) =>
-      c.json({ ok: true, data: listManagedPackages("service") }),
-    );
-
-    this.app.post("/api/manage/install", async (c) => {
-      const body = (await c.req.json()) as InstallRequest;
-      this.logAction("manage.install", {
-        target: body.target,
-        repoUrl: body.repoUrl,
-        packageManager: body.packageManager,
-      });
-      const result = await installManagedPackage(body);
-      return c.json(result);
-    });
-
-    this.app.post("/api/manage/check-update", async (c) => {
-      const body = (await c.req.json()) as {
-        name: string;
-        target: "plugin" | "service";
-      };
-      this.logAction("manage.check-update", body);
-      const result = await checkUpdate(body.name, body.target);
-      return c.json(result);
-    });
-
-    this.app.post("/api/manage/update", async (c) => {
-      const body = (await c.req.json()) as UpdateRequest;
-      this.logAction("manage.update", body);
-      const result = await updateManagedPackage(body);
-      return c.json(result);
-    });
-
-    this.app.post("/api/manage/remove", async (c) => {
-      const body = (await c.req.json()) as RemoveRequest;
-      this.logAction("manage.remove", body);
-      const result = await removeManagedPackage(body);
-      return c.json(result);
-    });
-
-    this.app.get("/api/ai/base", (c) =>
-      c.json({ ok: true, data: getChatConfig("base.json") }),
-    );
-    this.app.put("/api/ai/base", async (c) => {
-      const body = await c.req.json();
-      this.logAction("ai.base.update");
-      return c.json({ ok: true, data: updateChatConfig("base.json", body) });
-    });
-
-    this.app.get("/api/ai/personalization", (c) =>
-      c.json({ ok: true, data: getChatConfig("personalization.json") }),
-    );
-    this.app.put("/api/ai/personalization", async (c) => {
-      const body = await c.req.json();
-      this.logAction("ai.personalization.update");
-      return c.json({
-        ok: true,
-        data: updateChatConfig("personalization.json", body),
-      });
-    });
-
-    this.app.get("/api/ai/settings", (c) =>
-      c.json({ ok: true, data: getChatConfig("settings.json") }),
-    );
-    this.app.put("/api/ai/settings", async (c) => {
-      const body = await c.req.json();
-      this.logAction("ai.settings.update");
-      return c.json({
-        ok: true,
-        data: updateChatConfig("settings.json", body),
-      });
-    });
-
-    this.app.get("/api/ai/instances", (c) => {
-      const names = aiService?.api?.list?.() ?? [];
-      return c.json({ ok: true, data: names });
-    });
-
-    this.app.post("/api/ai/instances", async (c) => {
-      const body = await c.req.json();
-      this.logAction("ai.instance.create", {
-        name: body?.name,
-        apiUrl: body?.apiUrl,
-        modelType: body?.modelType,
-      });
-      if (!aiService?.api?.create) {
-        return c.json({ ok: false, error: "AI_SERVICE_UNAVAILABLE" }, 503);
-      }
-
-      await aiService.api.create({
-        name: body.name,
-        apiUrl: body.apiUrl,
-        apiKey: body.apiKey,
-        modelType: body.modelType || "text",
-      });
-      return c.json({ ok: true, data: aiService.api.list() });
-    });
-
-    this.app.delete("/api/ai/instances/:name", (c) => {
-      const name = c.req.param("name");
-      this.logAction("ai.instance.remove", { name });
-      const ok = aiService?.api?.remove?.(name);
-      return c.json({ ok: Boolean(ok) });
-    });
-
-    this.app.post("/api/ai/default/:name", (c) => {
-      const name = c.req.param("name");
-      this.logAction("ai.instance.set-default", { name });
-      const ok = aiService?.api?.setDefault?.(name);
-      return c.json({ ok: Boolean(ok) });
-    });
-
-    this.app.get("/api/ai/skills", (c) => {
-      const skills = aiService?.api?.getAllSkills?.();
-      const tools = aiService?.api?.getAllTools?.();
-      return c.json({
-        ok: true,
-        data: {
-          skills: skills ? Array.from(skills.keys()) : [],
-          tools: tools ? Array.from(tools.keys()) : [],
-        },
-      });
-    });
-
-    this.app.get("/api/meme/tree", (c) =>
-      c.json({ ok: true, data: listMemeTree() }),
-    );
-
-    this.app.post("/api/meme/upload", async (c) => {
-      const form = await c.req.formData();
-      const character = String(form.get("character") || "unknown");
-      const emotion = String(form.get("emotion") || "default");
-      const file = form.get("file") as File | null;
-      if (!file) {
-        return c.json({ ok: false, error: "FILE_REQUIRED" }, 400);
-      }
-
-      const dir = path.join(CHAT_DATA_DIR, "meme", character, emotion);
-      fs.mkdirSync(dir, { recursive: true });
-
-      const fileName = file.name || `upload-${Date.now()}.png`;
-      const filePath = path.join(dir, fileName);
-      const buffer = Buffer.from(await file.arrayBuffer());
-      fs.writeFileSync(filePath, buffer);
-      this.logAction("meme.upload", { character, emotion, fileName });
-
-      return c.json({ ok: true, path: path.relative(process.cwd(), filePath) });
-    });
-
-    this.app.delete("/api/meme", async (c) => {
-      const body = await c.req.json();
-      const filePath = path.join(process.cwd(), String(body.path || ""));
-      if (!fs.existsSync(filePath)) {
-        return c.json({ ok: false, error: "NOT_FOUND" }, 404);
-      }
-      fs.unlinkSync(filePath);
-      this.logAction("meme.delete", { path: body.path });
-      return c.json({ ok: true });
-    });
-
-    this.app.get("/api/plugin-config/:name", (c) => {
-      const name = c.req.param("name");
-      return c.json({ ok: true, data: getPluginConfigs(name) });
-    });
-
-    this.app.put("/api/plugin-config/:name/:config", async (c) => {
-      const pluginName = c.req.param("name");
-      const configName = c.req.param("config");
-      const body = await c.req.json();
-      savePluginConfig(pluginName, configName, body);
-      this.logAction("plugin-config.update", { pluginName, configName });
-      return c.json({ ok: true });
-    });
-
-    this.app.get("/api/db/tables", (c) =>
-      c.json({ ok: true, data: listTables() }),
-    );
-
-    this.app.get("/api/db/messages", (c) => {
-      const q = c.req.query();
-      const data = queryMessages({
-        table: q.table,
-        keyword: q.keyword,
-        userId: q.userId,
-        sessionId: q.sessionId,
-        startTime: q.startTime ? Number(q.startTime) : undefined,
-        endTime: q.endTime ? Number(q.endTime) : undefined,
-        page: q.page ? Number(q.page) : 1,
-        pageSize: q.pageSize ? Number(q.pageSize) : 20,
-      });
-      return c.json({ ok: true, data });
-    });
-
-    this.app.get("/api/db/stats", (c) =>
-      c.json({ ok: true, data: getStats() }),
-    );
-
-    this.app.put("/api/db/message", async (c) => {
-      const body = await c.req.json();
-      this.logAction("db.message.update", {
-        table: body?.table,
-        idField: body?.idField,
-        id: body?.id,
-      });
-      return c.json({ ok: true, data: updateMessage(body) });
-    });
-
-    this.app.post("/api/db/cleanup", async (c) => {
-      const body = await c.req.json();
-      this.logAction("db.cleanup", body);
-      return c.json({ ok: true, data: deleteMessagesByRange(body) });
-    });
-
-    this.app.get("/api/db/export", (c) => {
-      const format = (c.req.query("format") === "csv" ? "csv" : "json") as
-        | "json"
-        | "csv";
-      this.logAction("db.export", { format });
-      const result = exportData(format);
-      return c.json({ ok: true, data: result });
-    });
-
-    this.app.post("/api/db/import", async (c) => {
-      const form = await c.req.formData();
-      const file = form.get("file") as File | null;
-      if (!file) {
-        return c.json({ ok: false, error: "FILE_REQUIRED" }, 400);
-      }
-
-      const backupDir = path.join(CHAT_DATA_DIR, "backup");
-      fs.mkdirSync(backupDir, { recursive: true });
-      const fullPath = path.join(backupDir, `${Date.now()}-${file.name}`);
-      fs.writeFileSync(fullPath, Buffer.from(await file.arrayBuffer()));
-      this.logAction("db.import", { fileName: file.name });
-
-      const result = importDataFromJson(fullPath);
-      return c.json({ ok: true, data: result });
-    });
+    this.app.route("/api/config", createConfigRoutes());
+    this.app.route("/api/settings", createWebUISettingsRoutes());
+    this.app.route("/api/ai", createAIRoutes());
+    this.app.route("/api/manage", createManageRoutes());
+    this.app.route("/api/db", createDBRoutes());
+    this.app.route("/api/plugin-config", createPluginConfigRoutes());
+    this.app.route("/api/meme", createMemeRoutes());
 
     this.app.get(
       "/api/ws/logs",
@@ -468,7 +203,7 @@ const runtime = new WebUIRuntime();
 
 const webUIService: MiokuService = {
   name: "webui",
-  version: "1.0.2",
+  version: "1.1.0",
   description: "Mioku WebUI 管理服务",
   api: {
     getSettings: () => getWebUISettings(),

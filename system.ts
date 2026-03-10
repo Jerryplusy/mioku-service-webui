@@ -3,22 +3,29 @@ import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import { connectedBots, systemInfo } from "mioki";
-import type { InstallRequest, ManagedTarget, PackageManager, RemoveRequest, UpdateRequest, WebUISettings } from "./types";
+import type {
+  InstallRequest,
+  ManagedTarget,
+  PackageManager,
+  RemoveRequest,
+  UpdateRequest,
+  WebUISettings,
+} from "./types";
 import {
   CHAT_CONFIG_DIR,
-  LOCAL_CONFIG_PATH,
-  PLUGINS_DIR,
-  ROOT_PACKAGE_PATH,
-  SERVICES_DIR,
-  SETTINGS_PATH,
   defaultWebUISettings,
   ensureDir,
   getInstallCommand,
   isValidRepoUrl,
+  LOCAL_CONFIG_PATH,
   normalizePackageManager,
+  PLUGINS_DIR,
   readJsonFile,
+  ROOT_PACKAGE_PATH,
   runCommand,
   safeNameFromRepo,
+  SERVICES_DIR,
+  SETTINGS_PATH,
   writeJsonFile,
 } from "./utils";
 
@@ -42,7 +49,10 @@ function getTargetRoot(target: ManagedTarget): string {
   return target === "plugin" ? PLUGINS_DIR : SERVICES_DIR;
 }
 
-function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>): T {
+function deepMerge<T extends Record<string, any>>(
+  target: T,
+  source: Partial<T>,
+): T {
   const result = { ...target };
   for (const key in source) {
     const sourceValue = source[key];
@@ -106,7 +116,10 @@ function packageManagerFromSettings(input?: PackageManager): PackageManager {
 
 export function getWebUISettings(): WebUISettings {
   ensureDir(path.dirname(SETTINGS_PATH));
-  const settings = readJsonFile<WebUISettings>(SETTINGS_PATH, defaultWebUISettings);
+  const settings = readJsonFile<WebUISettings>(
+    SETTINGS_PATH,
+    defaultWebUISettings,
+  );
   const merged = {
     ...defaultWebUISettings,
     ...settings,
@@ -116,12 +129,16 @@ export function getWebUISettings(): WebUISettings {
   return merged;
 }
 
-export function updateWebUISettings(input: Partial<WebUISettings>): WebUISettings {
+export function updateWebUISettings(
+  input: Partial<WebUISettings>,
+): WebUISettings {
   const current = getWebUISettings();
   const next: WebUISettings = {
     ...current,
     ...input,
-    packageManager: normalizePackageManager(input.packageManager ?? current.packageManager),
+    packageManager: normalizePackageManager(
+      input.packageManager ?? current.packageManager,
+    ),
   };
   writeJsonFile(SETTINGS_PATH, next);
   return next;
@@ -138,10 +155,15 @@ function checkDependentServices(packageJson: any): string[] {
   });
 }
 
-export function listManagedPackages(target: ManagedTarget): Array<Record<string, any>> {
+export function listManagedPackages(
+  target: ManagedTarget,
+): Array<Record<string, any>> {
   const root = getTargetRoot(target);
   ensureDir(root);
-  const names = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  const names = fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
 
   return names.map((name) => {
     const fullPath = path.join(root, name);
@@ -157,7 +179,9 @@ export function listManagedPackages(target: ManagedTarget): Array<Record<string,
   });
 }
 
-export async function installManagedPackage(input: InstallRequest): Promise<Record<string, any>> {
+export async function installManagedPackage(
+  input: InstallRequest,
+): Promise<Record<string, any>> {
   if (!isValidRepoUrl(input.repoUrl)) {
     throw new Error("仓库地址无效");
   }
@@ -172,7 +196,11 @@ export async function installManagedPackage(input: InstallRequest): Promise<Reco
     throw new Error(`${packageName} 已存在`);
   }
 
-  const clone = await runCommand("git", ["clone", input.repoUrl, destination], process.cwd());
+  const clone = await runCommand(
+    "git",
+    ["clone", input.repoUrl, destination],
+    process.cwd(),
+  );
   if (clone.code !== 0) {
     throw new Error(`git clone 失败: ${clone.stderr || clone.stdout}`);
   }
@@ -182,7 +210,11 @@ export async function installManagedPackage(input: InstallRequest): Promise<Reco
 
   const packageManager = packageManagerFromSettings(input.packageManager);
   const installCmd = getInstallCommand(packageManager);
-  const install = await runCommand(installCmd.cmd, installCmd.args, destination);
+  const install = await runCommand(
+    installCmd.cmd,
+    installCmd.args,
+    destination,
+  );
 
   if (install.code !== 0) {
     throw new Error(`依赖安装失败: ${install.stderr || install.stdout}`);
@@ -208,7 +240,10 @@ export async function installManagedPackage(input: InstallRequest): Promise<Reco
   };
 }
 
-export async function checkUpdate(name: string, target: ManagedTarget): Promise<Record<string, any>> {
+export async function checkUpdate(
+  name: string,
+  target: ManagedTarget,
+): Promise<Record<string, any>> {
   const dir = path.join(getTargetRoot(target), name);
   if (!fs.existsSync(dir)) {
     throw new Error("目录不存在");
@@ -219,11 +254,22 @@ export async function checkUpdate(name: string, target: ManagedTarget): Promise<
     throw new Error(`git fetch 失败: ${fetchRes.stderr || fetchRes.stdout}`);
   }
 
-  const compare = await runCommand("git", ["rev-list", "--left-right", "--count", "HEAD...@{u}"], dir);
-  const parts = compare.stdout.trim().split(/\s+/).map((item) => Number(item));
+  const compare = await runCommand(
+    "git",
+    ["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+    dir,
+  );
+  const parts = compare.stdout
+    .trim()
+    .split(/\s+/)
+    .map((item) => Number(item));
   const behind = Number.isFinite(parts[1]) ? parts[1] : 0;
 
-  const changelog = await runCommand("git", ["log", "--oneline", "HEAD..@{u}", "-n", "30"], dir);
+  const changelog = await runCommand(
+    "git",
+    ["log", "--oneline", "HEAD..@{u}", "-n", "30"],
+    dir,
+  );
 
   return {
     ok: true,
@@ -237,7 +283,9 @@ function packageJsonChanged(before: string, after: string): boolean {
   return before !== after;
 }
 
-export async function updateManagedPackage(input: UpdateRequest): Promise<Record<string, any>> {
+export async function updateManagedPackage(
+  input: UpdateRequest,
+): Promise<Record<string, any>> {
   const dir = path.join(getTargetRoot(input.target), input.name);
   if (!fs.existsSync(dir)) {
     throw new Error("目录不存在");
@@ -272,7 +320,9 @@ export async function updateManagedPackage(input: UpdateRequest): Promise<Record
   };
 }
 
-export async function removeManagedPackage(input: RemoveRequest): Promise<Record<string, any>> {
+export async function removeManagedPackage(
+  input: RemoveRequest,
+): Promise<Record<string, any>> {
   const dir = path.join(getTargetRoot(input.target), input.name);
   if (!fs.existsSync(dir)) {
     throw new Error("目录不存在");
@@ -282,7 +332,9 @@ export async function removeManagedPackage(input: RemoveRequest): Promise<Record
 
   if (input.target === "plugin") {
     const rootPkg = readRootPackageJson();
-    const plugins = ensureMiokiPlugins(rootPkg).filter((name: string) => name !== input.name);
+    const plugins = ensureMiokiPlugins(rootPkg).filter(
+      (name: string) => name !== input.name,
+    );
     rootPkg.mioki.plugins = plugins;
     writeRootPackageJson(rootPkg);
     updateLocalConfigPlugins(plugins);
@@ -326,11 +378,19 @@ async function getSystemInformationSnapshot(): Promise<{
         : Number(disk?.use || 0);
 
     const networkList = Array.isArray(netStats) ? netStats : [];
-    const netRxPerSec = networkList.reduce((acc, item) => acc + Number(item?.rx_sec || 0), 0);
-    const netTxPerSec = networkList.reduce((acc, item) => acc + Number(item?.tx_sec || 0), 0);
+    const netRxPerSec = networkList.reduce(
+      (acc, item) => acc + Number(item?.rx_sec || 0),
+      0,
+    );
+    const netTxPerSec = networkList.reduce(
+      (acc, item) => acc + Number(item?.tx_sec || 0),
+      0,
+    );
 
     return {
-      diskUsagePercent: Number.isFinite(diskUsagePercent) ? diskUsagePercent : 0,
+      diskUsagePercent: Number.isFinite(diskUsagePercent)
+        ? diskUsagePercent
+        : 0,
       diskTotal,
       diskUsed,
       netRxPerSec: Number.isFinite(netRxPerSec) ? netRxPerSec : 0,
@@ -358,7 +418,12 @@ function sampleCpuTimes() {
 
   for (const cpu of cpus) {
     idle += cpu.times.idle;
-    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.irq + cpu.times.idle;
+    total +=
+      cpu.times.user +
+      cpu.times.nice +
+      cpu.times.sys +
+      cpu.times.irq +
+      cpu.times.idle;
   }
 
   return { idle, total };
@@ -434,8 +499,10 @@ async function getBotDetails(bot: any): Promise<Record<string, any>> {
 
     const stat = status?.stat || null;
     const startTs = Number(stat?.start_time || 0);
-    const onlineDurationMs = startTs > 0 ? Math.max(0, Date.now() - startTs) : 0;
-    const onlineFromStatus = typeof status?.online === "boolean" ? status.online : true;
+    const onlineDurationMs =
+      startTs > 0 ? Math.max(0, Date.now() - startTs) : 0;
+    const onlineFromStatus =
+      typeof status?.online === "boolean" ? status.online : true;
 
     return {
       ...base,
@@ -467,17 +534,23 @@ export async function getSystemOverview(): Promise<Record<string, any>> {
   const totalMemory = os.totalmem();
   const freeMemory = os.freemem();
   const usedMemory = Math.max(0, totalMemory - freeMemory);
-  const memoryUsagePercent = totalMemory > 0 ? Number(((usedMemory / totalMemory) * 100).toFixed(1)) : 0;
+  const memoryUsagePercent =
+    totalMemory > 0 ? Number(((usedMemory / totalMemory) * 100).toFixed(1)) : 0;
 
   const processMemory = process.memoryUsage();
-  const processMemoryPercent = totalMemory > 0 ? Number(((processMemory.rss / totalMemory) * 100).toFixed(1)) : 0;
+  const processMemoryPercent =
+    totalMemory > 0
+      ? Number(((processMemory.rss / totalMemory) * 100).toFixed(1))
+      : 0;
   const siSnapshot = await getSystemInformationSnapshot();
 
   const botInstances = Array.from(connectedBots.values());
   const bots = await Promise.all(botInstances.map((bot) => getBotDetails(bot)));
   const selectedBot = bots[0] || null;
 
-  const webuiPkgPath = fs.existsSync(path.join(process.cwd(), "mioku-webui", "package.json"))
+  const webuiPkgPath = fs.existsSync(
+    path.join(process.cwd(), "mioku-webui", "package.json"),
+  )
     ? path.join(process.cwd(), "mioku-webui", "package.json")
     : path.join(process.cwd(), "webui", "package.json");
 
@@ -509,10 +582,16 @@ export async function getSystemOverview(): Promise<Record<string, any>> {
       nodeVersion: process.version,
     },
     versions: {
-      mioki: normalizeVersionSpec(rootPkg?.dependencies?.mioki || rootPkg?.devDependencies?.mioki || "unknown"),
+      mioki: normalizeVersionSpec(
+        rootPkg?.dependencies?.mioki ||
+          rootPkg?.devDependencies?.mioki ||
+          "unknown",
+      ),
       mioku: rootPkg?.version || "unknown",
       webui: readPackageVersion(webuiPkgPath),
-      webuiService: readPackageVersion(path.join(process.cwd(), "src", "services", "webui", "package.json")),
+      webuiService: readPackageVersion(
+        path.join(process.cwd(), "src", "services", "webui", "package.json"),
+      ),
     },
     plugins: listManagedPackages("plugin"),
     services: listManagedPackages("service"),
@@ -532,4 +611,70 @@ export function updateChatConfig(fileName: string, data: any): any {
   const filePath = path.join(CHAT_CONFIG_DIR, fileName);
   writeJsonFile(filePath, data);
   return data;
+}
+
+export interface MiokuConfig {
+  owners: number[];
+  admins: number[];
+  napcat: Array<{
+    name: string;
+    protocol: string;
+    port: number;
+    host: string;
+    token: string;
+  }>;
+  plugins: string[];
+}
+
+export function getMiokuConfig(): MiokuConfig {
+  const localConfig = readJsonFile<any>(LOCAL_CONFIG_PATH, { mioki: {} });
+  const rootPkg = readRootPackageJson();
+
+  const miokiConfig = localConfig?.mioki || rootPkg?.mioki || {};
+
+  return {
+    owners: Array.isArray(miokiConfig.owners) ? miokiConfig.owners : [],
+    admins: Array.isArray(miokiConfig.admins) ? miokiConfig.admins : [],
+    napcat: Array.isArray(miokiConfig.napcat) ? miokiConfig.napcat : [],
+    plugins: Array.isArray(miokiConfig.plugins) ? miokiConfig.plugins : [],
+  };
+}
+
+export function updateMiokuConfig(config: Partial<MiokuConfig>): MiokuConfig {
+  const current = getMiokuConfig();
+  const updated: MiokuConfig = {
+    owners: Array.isArray(config.owners) ? config.owners : current.owners,
+    admins: Array.isArray(config.admins) ? config.admins : current.admins,
+    napcat: Array.isArray(config.napcat) ? config.napcat : current.napcat,
+    plugins: Array.isArray(config.plugins) ? config.plugins : current.plugins,
+  };
+
+  const localConfig = readJsonFile<any>(LOCAL_CONFIG_PATH, { mioki: {} });
+  localConfig.mioki = {
+    ...localConfig.mioki,
+    ...updated,
+  };
+  writeJsonFile(LOCAL_CONFIG_PATH, localConfig);
+
+  const rootPkg = readRootPackageJson();
+  if (rootPkg.mioki) {
+    rootPkg.mioki.owners = updated.owners;
+    rootPkg.mioki.admins = updated.admins;
+    rootPkg.mioki.napcat = updated.napcat;
+    rootPkg.mioki.plugins = updated.plugins;
+    writeRootPackageJson(rootPkg);
+  }
+
+  return updated;
+}
+
+export function getAvailablePlugins(): string[] {
+  ensureDir(PLUGINS_DIR);
+  return fs
+    .readdirSync(PLUGINS_DIR, { withFileTypes: true })
+    .filter(
+      (e) =>
+        e.isDirectory() && !e.name.startsWith("_") && !e.name.startsWith("."),
+    )
+    .map((e) => e.name);
 }
