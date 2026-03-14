@@ -46,9 +46,14 @@ interface MiokiRuntimeConfig {
 }
 
 const SYSTEM_PLUGIN_NAMES = new Set(["boot", "chat", "help"]);
+const SYSTEM_SERVICE_NAMES = new Set(["ai", "config", "help", "screenshot"]);
 
 function isSystemPluginName(name: string): boolean {
   return SYSTEM_PLUGIN_NAMES.has(String(name || "").trim().toLowerCase());
+}
+
+function isSystemServiceName(name: string): boolean {
+  return SYSTEM_SERVICE_NAMES.has(String(name || "").trim().toLowerCase());
 }
 
 function getTargetRoot(target: ManagedTarget): string {
@@ -309,6 +314,7 @@ export function listManagedPackages(
       description: pkg?.description ?? "",
       hasGit: fs.existsSync(path.join(fullPath, ".git")),
       isSystemPlugin: target === "plugin" ? isSystemPluginName(name) : false,
+      isSystemService: target === "service" ? isSystemServiceName(name) : false,
       repository: getRepositoryFromPackage(pkg),
       requiredServices: pkg?.mioku?.services ?? [],
     };
@@ -437,6 +443,9 @@ export async function removeManagedPackage(
   if (input.target === "plugin" && isSystemPluginName(input.name)) {
     throw new Error("系统插件不可卸载");
   }
+  if (input.target === "service" && isSystemServiceName(input.name)) {
+    throw new Error("系统服务不可卸载");
+  }
 
   const dir = resolveManagedDir(input.target, input.name);
 
@@ -512,6 +521,8 @@ export async function getManagedPackageDetail(
       description: pkg?.description || "",
       hasGit: fs.existsSync(path.join(dir, ".git")),
       isSystemPlugin: target === "plugin" ? isSystemPluginName(name) : false,
+      isSystemService:
+        target === "service" ? isSystemServiceName(name) : false,
       repository: repositoryFromPkg,
       originUrl,
       homepage: pkg?.homepage || "",

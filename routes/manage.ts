@@ -35,6 +35,14 @@ export function createManageRoutes() {
     const result = await getManagedPackageDetail(name, "plugin");
     return c.json(result);
   });
+  app.get("/services/overview", async (c) =>
+    c.json({ ok: true, data: await listManagedPackagesWithUpdates("service") }),
+  );
+  app.get("/services/:name", async (c) => {
+    const name = c.req.param("name");
+    const result = await getManagedPackageDetail(name, "service");
+    return c.json(result);
+  });
 
   app.post("/install", async (c) => {
     const body = (await c.req.json()) as InstallRequest;
