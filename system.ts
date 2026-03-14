@@ -26,6 +26,7 @@ import {
   safeNameFromRepo,
   SERVICES_DIR,
   SETTINGS_PATH,
+  WEBUI_DIST,
   writeJsonFile,
 } from "./utils";
 
@@ -204,6 +205,127 @@ async function getGitOriginUrl(dir: string): Promise<string> {
   return res.stdout.trim();
 }
 
+function resolveWebUIProjectDir(): string {
+  const candidates = [
+    path.join(process.cwd(), "mioku-webui"),
+    path.join(process.cwd(), "webui"),
+  ];
+
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, "package.json"))) {
+      return dir;
+    }
+  }
+  return candidates[0];
+}
+
+function readInstalledWebUIVersion(): string {
+  const versionFileCandidates = [
+    path.join(WEBUI_DIST, "webui-version.json"),
+    path.join(WEBUI_DIST, ".webui-version"),
+  ];
+
+  for (const versionFile of versionFileCandidates) {
+    if (!fs.existsSync(versionFile)) continue;
+    try {
+      const raw = fs.readFileSync(versionFile, "utf-8").trim();
+      if (!raw) continue;
+      if (versionFile.endsWith(".json")) {
+        const parsed = JSON.parse(raw);
+        const version = String(parsed?.version || "").trim();
+        if (version) return normalizeVersionSpec(version);
+      } else {
+        return normalizeVersionSpec(raw);
+      }
+    } catch {
+      // ignore invalid version marker
+    }
+  }
+
+  return readPackageVersion(path.join(resolveWebUIProjectDir(), "package.json"));
+}
+
+function parseGitHubRepo(
+  input: string,
+): { owner: string; repo: string; fullName: string } | null {
+  const url = String(input || "").trim();
+  if (!url) return null;
+
+  const patterns = [
+    /^https?:\/\/github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:[/?#].*)?$/i,
+    /^git@github\.com:([^/]+)\/([^/#?]+?)(?:\.git)?$/i,
+    /^ssh:\/\/git@github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const matched = url.match(pattern);
+    if (!matched) continue;
+    const owner = matched[1];
+    const repo = matched[2];
+    if (!owner || !repo) continue;
+    return { owner, repo, fullName: `${owner}/${repo}` };
+  }
+
+  return null;
+}
+
+function parseVersionParts(input: string): number[] {
+  const normalized = normalizeVersionSpec(input).replace(/^v/i, "");
+  const core = normalized.split("-")[0].split("+")[0];
+  if (!core) return [];
+  return core
+    .split(".")
+    .map((part) => Number(part))
+    .filter((part) => Number.isFinite(part) && part >= 0);
+}
+
+function isVersionNewer(latest: string, current: string): boolean {
+  const latestParts = parseVersionParts(latest);
+  const currentParts = parseVersionParts(current);
+  const maxLen = Math.max(latestParts.length, currentParts.length, 3);
+
+  for (let i = 0; i < maxLen; i += 1) {
+    const a = latestParts[i] ?? 0;
+    const b = currentParts[i] ?? 0;
+    if (a > b) return true;
+    if (a < b) return false;
+  }
+
+  const latestNormalized = normalizeVersionSpec(latest).replace(/^v/i, "");
+  const currentNormalized = normalizeVersionSpec(current).replace(/^v/i, "");
+  return latestNormalized !== currentNormalized;
+}
+
+function hasUsableDistFiles(dir: string): boolean {
+  return fs.existsSync(path.join(dir, "index.html"));
+}
+
+function resolveDistSourceDir(unpackDir: string): string | null {
+  const directCandidates = [path.join(unpackDir, "dist"), unpackDir];
+  for (const candidate of directCandidates) {
+    if (hasUsableDistFiles(candidate)) {
+      return candidate;
+    }
+  }
+
+  const children = fs.existsSync(unpackDir)
+    ? fs.readdirSync(unpackDir, { withFileTypes: true })
+    : [];
+  for (const child of children) {
+    if (!child.isDirectory()) continue;
+    const childDir = path.join(unpackDir, child.name);
+    const nestedDist = path.join(childDir, "dist");
+    if (hasUsableDistFiles(nestedDist)) {
+      return nestedDist;
+    }
+    if (hasUsableDistFiles(childDir)) {
+      return childDir;
+    }
+  }
+
+  return null;
+}
+
 function readReadmeFile(dir: string): { fileName: string; content: string } | null {
   const candidates = [
     "README.md",
@@ -240,9 +362,32 @@ interface ManagedPackageUpdateCacheEntry {
   info: ManagedPackageUpdateInfo;
 }
 
+interface WebUIReleaseAsset {
+  name: string;
+  browser_download_url: string;
+}
+
+interface WebUIUpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  releaseTag: string;
+  releaseUrl: string;
+  sourceRepo: string;
+  hasUpdates: boolean;
+  canUpdate: boolean;
+  assetName: string;
+  assetUrl: string;
+  checkedAt: number;
+  error?: string;
+}
+
 const MANAGED_UPDATE_CACHE_TTL_MS = 120_000;
 const managedPackageUpdateCache = new Map<string, ManagedPackageUpdateCacheEntry>();
 const managedOverviewRefreshInFlight = new Map<ManagedTarget, Promise<void>>();
+const WEBUI_UPDATE_CACHE_TTL_MS = 60_000;
+let webuiUpdateCache: WebUIUpdateCheckResult | null = null;
+let webuiUpdateCheckInFlight: Promise<WebUIUpdateCheckResult> | null = null;
+let webuiUpdatingInFlight: Promise<Record<string, any>> | null = null;
 
 function makeManagedUpdateCacheKey(target: ManagedTarget, name: string): string {
   return `${target}:${name}`;
@@ -774,6 +919,243 @@ export async function updateAllManagedPackages(input: {
   };
 }
 
+function pickWebUIDistAsset(assets: WebUIReleaseAsset[]): WebUIReleaseAsset | null {
+  const zipAssets = assets.filter((asset) =>
+    /\.zip$/i.test(String(asset?.name || "")),
+  );
+  if (zipAssets.length === 0) return null;
+  const distAsset = zipAssets.find((asset) =>
+    /dist/i.test(String(asset?.name || "")),
+  );
+  return distAsset || zipAssets[0] || null;
+}
+
+async function fetchLatestWebUIUpdate(
+  force = false,
+): Promise<WebUIUpdateCheckResult> {
+  const now = Date.now();
+  if (
+    !force &&
+    webuiUpdateCache &&
+    now - webuiUpdateCache.checkedAt < WEBUI_UPDATE_CACHE_TTL_MS
+  ) {
+    return webuiUpdateCache;
+  }
+
+  if (!force && webuiUpdateCheckInFlight) {
+    return webuiUpdateCheckInFlight;
+  }
+
+  const job = (async () => {
+    const projectDir = resolveWebUIProjectDir();
+    const currentVersion = readInstalledWebUIVersion();
+    const pkg = readPackageJson(projectDir) || {};
+    const originUrl = (await getGitOriginUrl(projectDir)) || "";
+    const repoUrl = originUrl || getRepositoryFromPackage(pkg);
+    const repo = parseGitHubRepo(repoUrl);
+
+    const fallback: WebUIUpdateCheckResult = {
+      currentVersion,
+      latestVersion: currentVersion,
+      releaseTag: "",
+      releaseUrl: "",
+      sourceRepo: repo?.fullName || "",
+      hasUpdates: false,
+      canUpdate: false,
+      assetName: "",
+      assetUrl: "",
+      checkedAt: Date.now(),
+    };
+
+    if (!repo) {
+      return {
+        ...fallback,
+        error: "WebUI 仓库不是 GitHub，暂不支持自动检查更新",
+      };
+    }
+
+    const res = await fetch(
+      `https://api.github.com/repos/${repo.owner}/${repo.repo}/releases/latest`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "mioku-webui-updater",
+        },
+      },
+    );
+
+    if (!res.ok) {
+      return {
+        ...fallback,
+        error: `查询 GitHub Release 失败: HTTP_${res.status}`,
+      };
+    }
+
+    const release = (await res.json().catch(() => ({}))) as any;
+    const releaseTag = String(release?.tag_name || release?.name || "").trim();
+    const latestVersion = normalizeVersionSpec(releaseTag || "unknown");
+    const assets = Array.isArray(release?.assets)
+      ? (release.assets as WebUIReleaseAsset[])
+      : [];
+    const distAsset = pickWebUIDistAsset(assets);
+    const hasUpdates =
+      latestVersion !== "unknown" && isVersionNewer(latestVersion, currentVersion);
+
+    return {
+      currentVersion,
+      latestVersion,
+      releaseTag,
+      releaseUrl: String(release?.html_url || ""),
+      sourceRepo: repo.fullName,
+      hasUpdates,
+      canUpdate: hasUpdates && Boolean(distAsset?.browser_download_url),
+      assetName: String(distAsset?.name || ""),
+      assetUrl: String(distAsset?.browser_download_url || ""),
+      checkedAt: Date.now(),
+      error:
+        hasUpdates && !distAsset
+          ? "已检测到新版本，但 Release 没有可用 dist 压缩包"
+          : "",
+    };
+  })();
+
+  webuiUpdateCheckInFlight = job;
+  try {
+    const result = await job;
+    webuiUpdateCache = result;
+    return result;
+  } finally {
+    webuiUpdateCheckInFlight = null;
+  }
+}
+
+export async function checkWebUIReleaseUpdate(
+  force = false,
+): Promise<Record<string, any>> {
+  return fetchLatestWebUIUpdate(force);
+}
+
+export async function updateWebUIDistFromRelease(): Promise<Record<string, any>> {
+  if (webuiUpdatingInFlight) {
+    return webuiUpdatingInFlight;
+  }
+
+  const task = (async () => {
+    const check = await fetchLatestWebUIUpdate(true);
+    if (!check.hasUpdates) {
+      return {
+        ok: true,
+        updated: false,
+        message: "当前已是最新版本",
+        currentVersion: check.currentVersion,
+        latestVersion: check.latestVersion,
+      };
+    }
+
+    if (!check.assetUrl) {
+      throw new Error(
+        check.error || "没有找到可下载的 dist 压缩包，请检查 Release 资产",
+      );
+    }
+
+    const tempDir = path.join(
+      os.tmpdir(),
+      `mioku-webui-update-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    const zipPath = path.join(tempDir, check.assetName || "webui-dist.zip");
+    const unpackDir = path.join(tempDir, "unpack");
+
+    ensureDir(tempDir);
+    ensureDir(unpackDir);
+
+    let backupPath = "";
+    try {
+      const downloadRes = await fetch(check.assetUrl, {
+        headers: {
+          Accept: "application/octet-stream",
+          "User-Agent": "mioku-webui-updater",
+        },
+      });
+
+      if (!downloadRes.ok) {
+        throw new Error(`下载 dist 压缩包失败: HTTP_${downloadRes.status}`);
+      }
+
+      const buffer = Buffer.from(await downloadRes.arrayBuffer());
+      fs.writeFileSync(zipPath, buffer);
+
+      const unzip = await runCommand(
+        "unzip",
+        ["-oq", zipPath, "-d", unpackDir],
+        process.cwd(),
+      );
+      if (unzip.code !== 0) {
+        throw new Error(`解压失败: ${unzip.stderr || unzip.stdout}`);
+      }
+
+      const sourceDir = resolveDistSourceDir(unpackDir);
+      if (!sourceDir) {
+        throw new Error("压缩包内未找到可用的 WebUI dist 文件");
+      }
+
+      ensureDir(path.dirname(WEBUI_DIST));
+      const targetExisted = fs.existsSync(WEBUI_DIST);
+      if (targetExisted) {
+        backupPath = `${WEBUI_DIST}.backup.${Date.now()}`;
+        fs.renameSync(WEBUI_DIST, backupPath);
+      }
+
+      fs.mkdirSync(WEBUI_DIST, { recursive: true });
+      fs.cpSync(sourceDir, WEBUI_DIST, { recursive: true, force: true });
+
+      if (!hasUsableDistFiles(WEBUI_DIST)) {
+        throw new Error("更新后的 dist 无效，缺少 index.html");
+      }
+
+      fs.writeFileSync(
+        path.join(WEBUI_DIST, ".webui-version"),
+        `${check.latestVersion}\n`,
+        "utf-8",
+      );
+
+      if (backupPath && fs.existsSync(backupPath)) {
+        fs.rmSync(backupPath, { recursive: true, force: true });
+      }
+    } catch (error) {
+      if (backupPath && fs.existsSync(backupPath)) {
+        fs.rmSync(WEBUI_DIST, { recursive: true, force: true });
+        fs.renameSync(backupPath, WEBUI_DIST);
+      }
+      throw error;
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+
+    webuiUpdateCache = {
+      ...check,
+      checkedAt: Date.now(),
+      currentVersion: check.latestVersion,
+      hasUpdates: false,
+      canUpdate: false,
+      error: "",
+    };
+
+    return {
+      ok: true,
+      updated: true,
+      version: check.latestVersion,
+      assetName: check.assetName,
+      releaseUrl: check.releaseUrl,
+      restartRequired: false,
+    };
+  })().finally(() => {
+    webuiUpdatingInFlight = null;
+  });
+
+  webuiUpdatingInFlight = task;
+  return task;
+}
+
 function readPackageVersion(filePath: string): string {
   try {
     if (!fs.existsSync(filePath)) return "unknown";
@@ -976,12 +1358,6 @@ export async function getSystemOverview(): Promise<Record<string, any>> {
   const bots = await Promise.all(botInstances.map((bot) => getBotDetails(bot)));
   const selectedBot = bots[0] || null;
 
-  const webuiPkgPath = fs.existsSync(
-    path.join(process.cwd(), "mioku-webui", "package.json"),
-  )
-    ? path.join(process.cwd(), "mioku-webui", "package.json")
-    : path.join(process.cwd(), "webui", "package.json");
-
   return {
     uptimeSeconds: process.uptime(),
     bots,
@@ -1016,7 +1392,7 @@ export async function getSystemOverview(): Promise<Record<string, any>> {
           "unknown",
       ),
       mioku: rootPkg?.version || "unknown",
-      webui: readPackageVersion(webuiPkgPath),
+      webui: readInstalledWebUIVersion(),
       webuiService: readPackageVersion(
         path.join(process.cwd(), "src", "services", "webui", "package.json"),
       ),
