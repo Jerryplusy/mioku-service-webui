@@ -31,3 +31,14 @@ export interface RemoveRequest {
   name: string;
   target: ManagedTarget;
 }
+
+export interface ChangeRepoRequest {
+  name: string;
+  target: ManagedTarget;
+  repoUrl: string;
+}
+
+export interface UpdateAllRequest {
+  target: ManagedTarget;
+  packageManager?: PackageManager;
+}

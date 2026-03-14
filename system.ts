@@ -45,6 +45,12 @@ interface MiokiRuntimeConfig {
   [key: string]: any;
 }
 
+const SYSTEM_PLUGIN_NAMES = new Set(["boot", "chat", "help"]);
+
+function isSystemPluginName(name: string): boolean {
+  return SYSTEM_PLUGIN_NAMES.has(String(name || "").trim().toLowerCase());
+}
+
 function getTargetRoot(target: ManagedTarget): string {
   return target === "plugin" ? PLUGINS_DIR : SERVICES_DIR;
 }
@@ -155,6 +161,134 @@ function checkDependentServices(packageJson: any): string[] {
   });
 }
 
+function assertSafePackageName(name: string): string {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    throw new Error("名称不能为空");
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(trimmed)) {
+    throw new Error("名称格式非法");
+  }
+  return trimmed;
+}
+
+function resolveManagedDir(target: ManagedTarget, name: string): string {
+  const safeName = assertSafePackageName(name);
+  const root = path.resolve(getTargetRoot(target));
+  const dir = path.resolve(root, safeName);
+  if (!dir.startsWith(`${root}${path.sep}`)) {
+    throw new Error("非法路径");
+  }
+  if (!fs.existsSync(dir)) {
+    throw new Error("目录不存在");
+  }
+  return dir;
+}
+
+function getRepositoryFromPackage(pkg: any): string {
+  const repository = pkg?.repository;
+  if (!repository) return "";
+  if (typeof repository === "string") return repository;
+  if (typeof repository?.url === "string") return repository.url;
+  return "";
+}
+
+async function getGitOriginUrl(dir: string): Promise<string> {
+  const res = await runCommand("git", ["remote", "get-url", "origin"], dir);
+  if (res.code !== 0) return "";
+  return res.stdout.trim();
+}
+
+function readReadmeFile(dir: string): { fileName: string; content: string } | null {
+  const candidates = [
+    "README.md",
+    "README.MD",
+    "readme.md",
+    "README.txt",
+    "README",
+    "readme",
+  ];
+
+  for (const fileName of candidates) {
+    const filePath = path.join(dir, fileName);
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const content = fs.readFileSync(filePath, "utf-8");
+      return { fileName, content };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+interface ManagedPackageUpdateInfo {
+  state: "up-to-date" | "has-updates" | "unknown" | "no-git";
+  hasUpdates: boolean;
+  behind: number;
+  changelog: string[];
+  error?: string;
+}
+
+async function getManagedPackageUpdateInfo(
+  dir: string,
+): Promise<ManagedPackageUpdateInfo> {
+  if (!fs.existsSync(path.join(dir, ".git"))) {
+    return {
+      state: "no-git",
+      hasUpdates: false,
+      behind: 0,
+      changelog: [],
+      error: "NOT_GIT_REPO",
+    };
+  }
+
+  const fetchRes = await runCommand("git", ["fetch", "--all"], dir);
+  if (fetchRes.code !== 0) {
+    return {
+      state: "unknown",
+      hasUpdates: false,
+      behind: 0,
+      changelog: [],
+      error: `git fetch 失败: ${fetchRes.stderr || fetchRes.stdout}`.trim(),
+    };
+  }
+
+  const compare = await runCommand(
+    "git",
+    ["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+    dir,
+  );
+  if (compare.code !== 0) {
+    return {
+      state: "unknown",
+      hasUpdates: false,
+      behind: 0,
+      changelog: [],
+      error: `无法比较更新: ${compare.stderr || compare.stdout}`.trim(),
+    };
+  }
+
+  const parts = compare.stdout
+    .trim()
+    .split(/\s+/)
+    .map((item) => Number(item));
+  const behind = Number.isFinite(parts[1]) ? parts[1] : 0;
+
+  const changelog = await runCommand(
+    "git",
+    ["log", "--oneline", "HEAD..@{u}", "-n", "30"],
+    dir,
+  );
+
+  return {
+    state: behind > 0 ? "has-updates" : "up-to-date",
+    hasUpdates: behind > 0,
+    behind,
+    changelog: changelog.stdout.trim().split("\n").filter(Boolean),
+  };
+}
+
 export function listManagedPackages(
   target: ManagedTarget,
 ): Array<Record<string, any>> {
@@ -174,6 +308,8 @@ export function listManagedPackages(
       version: pkg?.version ?? "0.0.0",
       description: pkg?.description ?? "",
       hasGit: fs.existsSync(path.join(fullPath, ".git")),
+      isSystemPlugin: target === "plugin" ? isSystemPluginName(name) : false,
+      repository: getRepositoryFromPackage(pkg),
       requiredServices: pkg?.mioku?.services ?? [],
     };
   });
@@ -244,38 +380,16 @@ export async function checkUpdate(
   name: string,
   target: ManagedTarget,
 ): Promise<Record<string, any>> {
-  const dir = path.join(getTargetRoot(target), name);
-  if (!fs.existsSync(dir)) {
-    throw new Error("目录不存在");
-  }
-
-  const fetchRes = await runCommand("git", ["fetch", "--all"], dir);
-  if (fetchRes.code !== 0) {
-    throw new Error(`git fetch 失败: ${fetchRes.stderr || fetchRes.stdout}`);
-  }
-
-  const compare = await runCommand(
-    "git",
-    ["rev-list", "--left-right", "--count", "HEAD...@{u}"],
-    dir,
-  );
-  const parts = compare.stdout
-    .trim()
-    .split(/\s+/)
-    .map((item) => Number(item));
-  const behind = Number.isFinite(parts[1]) ? parts[1] : 0;
-
-  const changelog = await runCommand(
-    "git",
-    ["log", "--oneline", "HEAD..@{u}", "-n", "30"],
-    dir,
-  );
-
+  const dir = resolveManagedDir(target, name);
+  const result = await getManagedPackageUpdateInfo(dir);
   return {
     ok: true,
-    hasUpdates: behind > 0,
-    behind,
-    changelog: changelog.stdout.trim().split("\n").filter(Boolean),
+    state: result.state,
+    hasUpdates: result.hasUpdates,
+    behind: result.behind,
+    changelog: result.changelog,
+    hasGit: result.state !== "no-git",
+    error: result.error,
   };
 }
 
@@ -286,10 +400,7 @@ function packageJsonChanged(before: string, after: string): boolean {
 export async function updateManagedPackage(
   input: UpdateRequest,
 ): Promise<Record<string, any>> {
-  const dir = path.join(getTargetRoot(input.target), input.name);
-  if (!fs.existsSync(dir)) {
-    throw new Error("目录不存在");
-  }
+  const dir = resolveManagedDir(input.target, input.name);
 
   const before = await runCommand("git", ["show", "HEAD:package.json"], dir);
 
@@ -323,10 +434,11 @@ export async function updateManagedPackage(
 export async function removeManagedPackage(
   input: RemoveRequest,
 ): Promise<Record<string, any>> {
-  const dir = path.join(getTargetRoot(input.target), input.name);
-  if (!fs.existsSync(dir)) {
-    throw new Error("目录不存在");
+  if (input.target === "plugin" && isSystemPluginName(input.name)) {
+    throw new Error("系统插件不可卸载");
   }
+
+  const dir = resolveManagedDir(input.target, input.name);
 
   fs.rmSync(dir, { recursive: true, force: true });
 
@@ -343,6 +455,188 @@ export async function removeManagedPackage(
   return {
     ok: true,
     restartRequired: true,
+  };
+}
+
+export async function listManagedPackagesWithUpdates(
+  target: ManagedTarget,
+): Promise<Array<Record<string, any>>> {
+  const packages = listManagedPackages(target);
+  const results = await Promise.all(
+    packages.map(async (item) => {
+      try {
+        const updateInfo = await getManagedPackageUpdateInfo(item.path);
+        return {
+          ...item,
+          updateState: updateInfo.state,
+          hasUpdates: updateInfo.hasUpdates,
+          behind: updateInfo.behind,
+          updateError: updateInfo.error || "",
+        };
+      } catch (error: any) {
+        return {
+          ...item,
+          updateState: "unknown",
+          hasUpdates: false,
+          behind: 0,
+          updateError: error?.message || "UPDATE_CHECK_FAILED",
+        };
+      }
+    }),
+  );
+  return results;
+}
+
+export async function getManagedPackageDetail(
+  name: string,
+  target: ManagedTarget,
+): Promise<Record<string, any>> {
+  const dir = resolveManagedDir(target, name);
+  const pkg = readPackageJson(dir) || {};
+  const readme = readReadmeFile(dir);
+  const originUrl = await getGitOriginUrl(dir);
+  const repositoryFromPkg = getRepositoryFromPackage(pkg);
+  const updateInfo = await getManagedPackageUpdateInfo(dir);
+  const requiredServices = Array.isArray(pkg?.mioku?.services)
+    ? pkg.mioku.services
+    : [];
+  const missingServices = checkDependentServices(pkg);
+
+  return {
+    ok: true,
+    data: {
+      name,
+      target,
+      path: dir,
+      version: pkg?.version || "0.0.0",
+      description: pkg?.description || "",
+      hasGit: fs.existsSync(path.join(dir, ".git")),
+      isSystemPlugin: target === "plugin" ? isSystemPluginName(name) : false,
+      repository: repositoryFromPkg,
+      originUrl,
+      homepage: pkg?.homepage || "",
+      requiredServices,
+      missingServices,
+      help: pkg?.mioku?.help || null,
+      readme: readme?.content || "",
+      readmeFile: readme?.fileName || "",
+      updateState: updateInfo.state,
+      hasUpdates: updateInfo.hasUpdates,
+      behind: updateInfo.behind,
+      changelog: updateInfo.changelog,
+      updateError: updateInfo.error || "",
+    },
+  };
+}
+
+export async function changeManagedPackageRepo(
+  name: string,
+  target: ManagedTarget,
+  repoUrl: string,
+): Promise<Record<string, any>> {
+  if (!isValidRepoUrl(repoUrl)) {
+    throw new Error("仓库地址无效");
+  }
+
+  const dir = resolveManagedDir(target, name);
+  const nextUrl = repoUrl.trim();
+  const oldUrl = await getGitOriginUrl(dir);
+
+  const setRemote = await runCommand(
+    "git",
+    ["remote", "set-url", "origin", nextUrl],
+    dir,
+  );
+  if (setRemote.code !== 0) {
+    throw new Error(`更新仓库地址失败: ${setRemote.stderr || setRemote.stdout}`);
+  }
+
+  const packagePath = path.join(dir, "package.json");
+  if (fs.existsSync(packagePath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(packagePath, "utf-8"));
+      if (typeof pkg.repository === "string") {
+        pkg.repository = nextUrl;
+      } else if (pkg.repository && typeof pkg.repository === "object") {
+        pkg.repository = { ...pkg.repository, url: nextUrl };
+      } else {
+        pkg.repository = nextUrl;
+      }
+      fs.writeFileSync(packagePath, JSON.stringify(pkg, null, 2), "utf-8");
+    } catch {
+      // ignore package.json update failure, git remote is the source of truth
+    }
+  }
+
+  return {
+    ok: true,
+    oldUrl,
+    newUrl: nextUrl,
+  };
+}
+
+export async function updateAllManagedPackages(input: {
+  target: ManagedTarget;
+  packageManager?: PackageManager;
+}): Promise<Record<string, any>> {
+  const packages = listManagedPackages(input.target);
+  const results: Array<Record<string, any>> = [];
+
+  for (const item of packages) {
+    const updateInfo = await getManagedPackageUpdateInfo(item.path);
+    if (updateInfo.state === "no-git") {
+      results.push({
+        name: item.name,
+        ok: false,
+        skipped: true,
+        reason: "NOT_GIT_REPO",
+      });
+      continue;
+    }
+    if (!updateInfo.hasUpdates) {
+      results.push({
+        name: item.name,
+        ok: true,
+        skipped: true,
+        reason: updateInfo.state === "unknown" ? "CHECK_FAILED" : "UP_TO_DATE",
+        error: updateInfo.error || "",
+      });
+      continue;
+    }
+
+    try {
+      const updated = await updateManagedPackage({
+        name: item.name,
+        target: input.target,
+        packageManager: input.packageManager,
+      });
+      results.push({
+        name: item.name,
+        ok: true,
+        skipped: false,
+        ...updated,
+      });
+    } catch (error: any) {
+      results.push({
+        name: item.name,
+        ok: false,
+        skipped: false,
+        error: error?.message || "UPDATE_FAILED",
+      });
+    }
+  }
+
+  const updatedCount = results.filter((item) => item.ok && !item.skipped).length;
+  const failedCount = results.filter((item) => !item.ok && !item.skipped).length;
+  const skippedCount = results.filter((item) => item.skipped).length;
+
+  return {
+    ok: failedCount === 0,
+    restartRequired: updatedCount > 0,
+    updatedCount,
+    failedCount,
+    skippedCount,
+    results,
   };
 }
 
