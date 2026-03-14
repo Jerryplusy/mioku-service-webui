@@ -235,6 +235,96 @@ interface ManagedPackageUpdateInfo {
   error?: string;
 }
 
+interface ManagedPackageUpdateCacheEntry {
+  checkedAt: number;
+  info: ManagedPackageUpdateInfo;
+}
+
+const MANAGED_UPDATE_CACHE_TTL_MS = 120_000;
+const managedPackageUpdateCache = new Map<string, ManagedPackageUpdateCacheEntry>();
+const managedOverviewRefreshInFlight = new Map<ManagedTarget, Promise<void>>();
+
+function makeManagedUpdateCacheKey(target: ManagedTarget, name: string): string {
+  return `${target}:${name}`;
+}
+
+function getCachedManagedUpdateInfo(
+  target: ManagedTarget,
+  name: string,
+): ManagedPackageUpdateCacheEntry | null {
+  return managedPackageUpdateCache.get(makeManagedUpdateCacheKey(target, name)) || null;
+}
+
+function setCachedManagedUpdateInfo(
+  target: ManagedTarget,
+  name: string,
+  info: ManagedPackageUpdateInfo,
+): void {
+  managedPackageUpdateCache.set(makeManagedUpdateCacheKey(target, name), {
+    checkedAt: Date.now(),
+    info,
+  });
+}
+
+function isManagedUpdateCacheFresh(entry: ManagedPackageUpdateCacheEntry | null): boolean {
+  if (!entry) return false;
+  return Date.now() - entry.checkedAt < MANAGED_UPDATE_CACHE_TTL_MS;
+}
+
+async function refreshManagedUpdatesInBackground(
+  target: ManagedTarget,
+  packages: Array<Record<string, any>>,
+): Promise<void> {
+  for (const item of packages) {
+    const name = String(item.name || "");
+    if (!name) continue;
+
+    if (!item.hasGit) {
+      setCachedManagedUpdateInfo(target, name, {
+        state: "no-git",
+        hasUpdates: false,
+        behind: 0,
+        changelog: [],
+        error: "NOT_GIT_REPO",
+      });
+      continue;
+    }
+
+    try {
+      const updateInfo = await getManagedPackageUpdateInfo(String(item.path || ""));
+      setCachedManagedUpdateInfo(target, name, updateInfo);
+    } catch (error: any) {
+      setCachedManagedUpdateInfo(target, name, {
+        state: "unknown",
+        hasUpdates: false,
+        behind: 0,
+        changelog: [],
+        error: error?.message || "UPDATE_CHECK_FAILED",
+      });
+    }
+  }
+}
+
+function scheduleManagedUpdatesRefresh(
+  target: ManagedTarget,
+  packages: Array<Record<string, any>>,
+): void {
+  if (managedOverviewRefreshInFlight.has(target)) return;
+
+  const shouldRefresh = packages.some((item) => {
+    if (!item.hasGit) return false;
+    const cached = getCachedManagedUpdateInfo(target, String(item.name || ""));
+    return !isManagedUpdateCacheFresh(cached);
+  });
+
+  if (!shouldRefresh) return;
+
+  const job = refreshManagedUpdatesInBackground(target, packages).finally(() => {
+    managedOverviewRefreshInFlight.delete(target);
+  });
+  managedOverviewRefreshInFlight.set(target, job);
+}
+
 async function getManagedPackageUpdateInfo(
   dir: string,
 ): Promise<ManagedPackageUpdateInfo> {
@@ -372,6 +462,10 @@ export async function installManagedPackage(
     updateLocalConfigPlugins(plugins);
   }
 
+  managedPackageUpdateCache.delete(
+    makeManagedUpdateCacheKey(input.target, packageName),
+  );
+
   return {
     ok: true,
     name: packageName,
@@ -388,6 +482,7 @@ export async function checkUpdate(
 ): Promise<Record<string, any>> {
   const dir = resolveManagedDir(target, name);
   const result = await getManagedPackageUpdateInfo(dir);
+  setCachedManagedUpdateInfo(target, name, result);
   return {
     ok: true,
     state: result.state,
@@ -429,6 +524,10 @@ export async function updateManagedPackage(
     reinstallOutput = install.stdout || install.stderr;
   }
 
+  managedPackageUpdateCache.delete(
+    makeManagedUpdateCacheKey(input.target, input.name),
+  );
+
   return {
     ok: true,
     restartRequired: true,
@@ -461,6 +560,10 @@ export async function removeManagedPackage(
     updateLocalConfigPlugins(plugins);
   }
 
+  managedPackageUpdateCache.delete(
+    makeManagedUpdateCacheKey(input.target, input.name),
+  );
+
   return {
     ok: true,
     restartRequired: true,
@@ -471,29 +574,46 @@ export async function listManagedPackagesWithUpdates(
   target: ManagedTarget,
 ): Promise<Array<Record<string, any>>> {
   const packages = listManagedPackages(target);
-  const results = await Promise.all(
-    packages.map(async (item) => {
-      try {
-        const updateInfo = await getManagedPackageUpdateInfo(item.path);
-        return {
-          ...item,
-          updateState: updateInfo.state,
-          hasUpdates: updateInfo.hasUpdates,
-          behind: updateInfo.behind,
-          updateError: updateInfo.error || "",
-        };
-      } catch (error: any) {
-        return {
-          ...item,
-          updateState: "unknown",
-          hasUpdates: false,
-          behind: 0,
-          updateError: error?.message || "UPDATE_CHECK_FAILED",
-        };
-      }
-    }),
-  );
-  return results;
+  scheduleManagedUpdatesRefresh(target, packages);
+  const refreshRunning = managedOverviewRefreshInFlight.has(target);
+
+  return packages.map((item) => {
+    const name = String(item.name || "");
+
+    if (!item.hasGit) {
+      return {
+        ...item,
+        updateState: "no-git",
+        hasUpdates: false,
+        behind: 0,
+        updateError: "NOT_GIT_REPO",
+        updateChecking: false,
+      };
+    }
+
+    const cached = getCachedManagedUpdateInfo(target, name);
+    if (cached) {
+      return {
+        ...item,
+        updateState: cached.info.state,
+        hasUpdates: cached.info.hasUpdates,
+        behind: cached.info.behind,
+        updateError: cached.info.error || "",
+        updateChecking: refreshRunning && !isManagedUpdateCacheFresh(cached),
+        updateCheckedAt: cached.checkedAt,
+      };
+    }
+
+    return {
+      ...item,
+      updateState: "unknown",
+      hasUpdates: false,
+      behind: 0,
+      updateError: "",
+      updateChecking: true,
+      updateCheckedAt: 0,
+    };
+  });
 }
 
 export async function getManagedPackageDetail(
@@ -506,6 +626,7 @@ export async function getManagedPackageDetail(
   const originUrl = await getGitOriginUrl(dir);
   const repositoryFromPkg = getRepositoryFromPackage(pkg);
   const updateInfo = await getManagedPackageUpdateInfo(dir);
+  setCachedManagedUpdateInfo(target, name, updateInfo);
   const requiredServices = Array.isArray(pkg?.mioku?.services)
     ? pkg.mioku.services
     : [];
@@ -578,6 +699,8 @@ export async function changeManagedPackageRepo(
       // ignore package.json update failure, git remote is the source of truth
     }
   }
+
+  managedPackageUpdateCache.delete(makeManagedUpdateCacheKey(target, name));
 
   return {
     ok: true,
