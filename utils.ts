@@ -20,7 +20,6 @@ export const defaultWebUISettings: WebUISettings = {
   port: 3339,
   host: "0.0.0.0",
   packageManager: "bun",
-  autoOpen: false,
 };
 
 export function ensureDir(dirPath: string): void {

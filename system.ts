@@ -128,14 +128,24 @@ function packageManagerFromSettings(input?: PackageManager): PackageManager {
 
 export function getWebUISettings(): WebUISettings {
   ensureDir(path.dirname(SETTINGS_PATH));
-  const settings = readJsonFile<WebUISettings>(
+  const settings = readJsonFile<Record<string, unknown>>(
     SETTINGS_PATH,
-    defaultWebUISettings,
+    defaultWebUISettings as unknown as Record<string, unknown>,
   );
-  const merged = {
-    ...defaultWebUISettings,
-    ...settings,
-    packageManager: normalizePackageManager(settings.packageManager),
+  const merged: WebUISettings = {
+    port:
+      typeof settings.port === "number" && Number.isFinite(settings.port)
+        ? settings.port
+        : defaultWebUISettings.port,
+    host:
+      typeof settings.host === "string" && settings.host.trim()
+        ? settings.host
+        : defaultWebUISettings.host,
+    packageManager: normalizePackageManager(
+      typeof settings.packageManager === "string"
+        ? settings.packageManager
+        : undefined,
+    ),
   };
   writeJsonFile(SETTINGS_PATH, merged);
   return merged;
@@ -146,8 +156,14 @@ export function updateWebUISettings(
 ): WebUISettings {
   const current = getWebUISettings();
   const next: WebUISettings = {
-    ...current,
-    ...input,
+    port:
+      typeof input.port === "number" && Number.isFinite(input.port)
+        ? input.port
+        : current.port,
+    host:
+      typeof input.host === "string" && input.host.trim()
+        ? input.host
+        : current.host,
     packageManager: normalizePackageManager(
       input.packageManager ?? current.packageManager,
     ),

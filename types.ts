@@ -6,7 +6,6 @@ export interface WebUISettings {
   port: number;
   host: string;
   packageManager: PackageManager;
-  autoOpen: boolean;
 }
 
 export interface AuthConfig {
