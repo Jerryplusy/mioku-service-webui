@@ -141,6 +141,8 @@ class WebUIRuntime {
     this.app.use("/assets/*", serveStatic({ root: WEBUI_DIST }));
     this.app.use("/favicon.ico", serveStatic({ root: WEBUI_DIST }));
     this.app.use("/miku-logo.png", serveStatic({ root: WEBUI_DIST }));
+    this.app.use("/about-hero.jpg", serveStatic({ root: WEBUI_DIST }));
+    this.app.use("/about-hero-dark.jpg", serveStatic({ root: WEBUI_DIST }));
     this.app.get("*", async (c) => {
       const indexPath = path.join(WEBUI_DIST, "index.html");
       if (!fs.existsSync(indexPath)) {
@@ -204,7 +206,7 @@ const runtime = new WebUIRuntime();
 
 const webUIService: MiokuService = {
   name: "webui",
-  version: "1.5.0",
+  version: "1.6.0",
   description: "Mioku WebUI 管理服务",
   api: {
     getSettings: () => getWebUISettings(),

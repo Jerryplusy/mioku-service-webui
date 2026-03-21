@@ -4,6 +4,8 @@ import {
   getMiokuConfig,
   updateMiokuConfig,
   getAvailablePlugins,
+  checkMiokuReleaseUpdate,
+  updateMiokuFromMain,
 } from "../system";
 
 export function createConfigRoutes() {
@@ -23,6 +25,20 @@ export function createConfigRoutes() {
       plugins: body?.plugins?.length,
     });
     const data = updateMiokuConfig(body);
+    return c.json({ ok: true, data });
+  });
+
+  app.get("/mioku/update/check", async (c) => {
+    const force = c.req.query("force") === "1";
+    const data = await checkMiokuReleaseUpdate(force);
+    return c.json({ ok: true, data });
+  });
+
+  app.post("/mioku/update/apply", async (c) => {
+    logger.info(`[webui-action] config.mioku.update.apply`, {
+      targetRef: "origin/main",
+    });
+    const data = await updateMiokuFromMain();
     return c.json({ ok: true, data });
   });
 

@@ -397,6 +397,19 @@ interface WebUIUpdateCheckResult {
   error?: string;
 }
 
+interface MiokuUpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  sourceRepo: string;
+  currentBranch: string;
+  targetRef: string;
+  hasUpdates: boolean;
+  behind: number;
+  changelog: string[];
+  checkedAt: number;
+  error?: string;
+}
+
 const MANAGED_UPDATE_CACHE_TTL_MS = 120_000;
 const managedPackageUpdateCache = new Map<string, ManagedPackageUpdateCacheEntry>();
 const managedOverviewRefreshInFlight = new Map<ManagedTarget, Promise<void>>();
@@ -404,6 +417,9 @@ const WEBUI_UPDATE_CACHE_TTL_MS = 60_000;
 let webuiUpdateCache: WebUIUpdateCheckResult | null = null;
 let webuiUpdateCheckInFlight: Promise<WebUIUpdateCheckResult> | null = null;
 let webuiUpdatingInFlight: Promise<Record<string, any>> | null = null;
+const MIOKU_UPDATE_CACHE_TTL_MS = 60_000;
+let miokuUpdateCache: MiokuUpdateCheckResult | null = null;
+let miokuUpdateCheckInFlight: Promise<MiokuUpdateCheckResult> | null = null;
 
 function makeManagedUpdateCacheKey(target: ManagedTarget, name: string): string {
   return `${target}:${name}`;
@@ -1049,6 +1065,183 @@ export async function checkWebUIReleaseUpdate(
   force = false,
 ): Promise<Record<string, any>> {
   return fetchLatestWebUIUpdate(force);
+}
+
+async function fetchLatestMiokuUpdate(
+  force = false,
+): Promise<MiokuUpdateCheckResult> {
+  const now = Date.now();
+  if (
+    !force &&
+    miokuUpdateCache &&
+    now - miokuUpdateCache.checkedAt < MIOKU_UPDATE_CACHE_TTL_MS
+  ) {
+    return miokuUpdateCache;
+  }
+
+  if (!force && miokuUpdateCheckInFlight) {
+    return miokuUpdateCheckInFlight;
+  }
+
+  const job = (async () => {
+    const rootPkg = readRootPackageJson() || {};
+    const currentVersion = normalizeVersionSpec(rootPkg?.version || "unknown");
+    const originUrl = (await getGitOriginUrl(process.cwd())) || "";
+    const repoUrl = originUrl || getRepositoryFromPackage(rootPkg);
+    const repo = parseGitHubRepo(repoUrl);
+    const currentBranchRes = await runCommand(
+      "git",
+      ["branch", "--show-current"],
+      process.cwd(),
+    );
+    const currentBranch =
+      currentBranchRes.code === 0
+        ? String(currentBranchRes.stdout || "").trim() || "unknown"
+        : "unknown";
+    const targetRef = "origin/main";
+
+    const fallback: MiokuUpdateCheckResult = {
+      currentVersion,
+      latestVersion: currentVersion,
+      sourceRepo: repo?.fullName || "",
+      currentBranch,
+      targetRef,
+      hasUpdates: false,
+      behind: 0,
+      changelog: [],
+      checkedAt: Date.now(),
+    };
+
+    if (!fs.existsSync(path.join(process.cwd(), ".git"))) {
+      return {
+        ...fallback,
+        error: "当前目录不是 Git 仓库，无法检查 Mioku 更新",
+      };
+    }
+
+    if (!repo) {
+      return {
+        ...fallback,
+        error: "Mioku 仓库不是 GitHub，暂不支持自动检查更新",
+      };
+    }
+
+    const fetchRes = await runCommand(
+      "git",
+      ["fetch", "origin", "main"],
+      process.cwd(),
+    );
+
+    if (fetchRes.code !== 0) {
+      return {
+        ...fallback,
+        error: `git fetch 失败: ${fetchRes.stderr || fetchRes.stdout}`.trim(),
+      };
+    }
+
+    const compare = await runCommand(
+      "git",
+      ["rev-list", "--left-right", "--count", `HEAD...${targetRef}`],
+      process.cwd(),
+    );
+
+    if (compare.code !== 0) {
+      return {
+        ...fallback,
+        error: `无法比较更新: ${compare.stderr || compare.stdout}`.trim(),
+      };
+    }
+
+    const parts = compare.stdout
+      .trim()
+      .split(/\s+/)
+      .map((item) => Number(item));
+    const behind = Number.isFinite(parts[1]) ? parts[1] : 0;
+    const changelogRes = await runCommand(
+      "git",
+      ["log", "--oneline", `HEAD..${targetRef}`, "-n", "30"],
+      process.cwd(),
+    );
+
+    let latestVersion = currentVersion;
+    const remotePkg = await runCommand(
+      "git",
+      ["show", `${targetRef}:package.json`],
+      process.cwd(),
+    );
+    if (remotePkg.code === 0) {
+      try {
+        const parsed = JSON.parse(remotePkg.stdout);
+        latestVersion = normalizeVersionSpec(parsed?.version || currentVersion);
+      } catch {
+        latestVersion = currentVersion;
+      }
+    }
+
+    return {
+      currentVersion,
+      latestVersion,
+      sourceRepo: repo.fullName,
+      currentBranch,
+      targetRef,
+      hasUpdates: behind > 0,
+      behind,
+      changelog: changelogRes.stdout.trim().split("\n").filter(Boolean),
+      checkedAt: Date.now(),
+      error: "",
+    };
+  })();
+
+  miokuUpdateCheckInFlight = job;
+  try {
+    const result = await job;
+    miokuUpdateCache = result;
+    return result;
+  } finally {
+    miokuUpdateCheckInFlight = null;
+  }
+}
+
+export async function checkMiokuReleaseUpdate(
+  force = false,
+): Promise<Record<string, any>> {
+  return fetchLatestMiokuUpdate(force);
+}
+
+export async function updateMiokuFromMain(): Promise<Record<string, any>> {
+  const before = await runCommand("git", ["show", "HEAD:package.json"], process.cwd());
+  const pull = await runCommand("git", ["pull", "origin", "main"], process.cwd());
+
+  if (pull.code !== 0) {
+    throw new Error(`git pull 失败: ${pull.stderr || pull.stdout}`);
+  }
+
+  const after = await runCommand("git", ["show", "HEAD:package.json"], process.cwd());
+  const changed = packageJsonChanged(before.stdout, after.stdout);
+
+  let reinstallOutput = "";
+  if (changed) {
+    const packageManager = packageManagerFromSettings();
+    const installCmd = getInstallCommand(packageManager);
+    const install = await runCommand(installCmd.cmd, installCmd.args, process.cwd());
+    if (install.code !== 0) {
+      throw new Error(`依赖安装失败: ${install.stderr || install.stdout}`);
+    }
+    reinstallOutput = install.stdout || install.stderr;
+  }
+
+  miokuUpdateCache = null;
+
+  const next = await fetchLatestMiokuUpdate(true);
+  return {
+    ok: true,
+    restartRequired: true,
+    packageJsonChanged: changed,
+    reinstallOutput,
+    currentVersion: next.currentVersion,
+    latestVersion: next.latestVersion,
+    hasUpdates: next.hasUpdates,
+  };
 }
 
 export async function updateWebUIDistFromRelease(): Promise<Record<string, any>> {
