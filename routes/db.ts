@@ -14,6 +14,8 @@ import {
   updateMessage,
 } from "../database";
 import { CHAT_DATA_DIR } from "../utils";
+import { loadPluginConfigPage } from "../config-page-loader";
+import { getDatasource } from "../datasources";
 
 export function createDBRoutes() {
   const app = new Hono();
@@ -74,6 +76,71 @@ export function createDBRoutes() {
 
 export function createPluginConfigRoutes() {
   const app = new Hono();
+
+  app.get("/overview", (c) => {
+    const pluginDir = path.join(process.cwd(), "plugins");
+    if (!fs.existsSync(pluginDir)) {
+      return c.json({ ok: true, data: [] });
+    }
+
+    const plugins = fs.readdirSync(pluginDir).filter((name) => {
+      const pluginPath = path.join(pluginDir, name);
+      return fs.statSync(pluginPath).isDirectory();
+    });
+
+    const overview = plugins
+      .map((name) => {
+        const configDir = path.join(process.cwd(), "config", name);
+        const hasConfigs = fs.existsSync(configDir) && fs.readdirSync(configDir).filter((f) => f.endsWith(".json")).length > 0;
+        const manifest = loadPluginConfigPage(name);
+
+        return {
+          name,
+          title: manifest?.title || name,
+          description: manifest?.description,
+          hasPage: manifest?.hasCustomPage || false,
+          configFiles: hasConfigs ? fs.readdirSync(configDir).filter((f) => f.endsWith(".json")).map((f) => f.replace(".json", "")) : [],
+        };
+      })
+      .filter((p) => p.hasPage && p.configFiles.length > 0);
+
+    return c.json({ ok: true, data: overview });
+  });
+
+  app.get("/:name/page", (c) => {
+    const name = c.req.param("name");
+    const manifest = loadPluginConfigPage(name);
+    const configs = getPluginConfigs(name);
+
+    if (!manifest) {
+      return c.json({ ok: true, data: null });
+    }
+
+    return c.json({
+      ok: true,
+      data: {
+        plugin: manifest.plugin,
+        title: manifest.title,
+        description: manifest.description,
+        markdown: manifest.markdown,
+        fields: manifest.fields,
+        hasCustomPage: manifest.hasCustomPage,
+        configs,
+      },
+    });
+  });
+
+  app.get("/datasources/:source", async (c) => {
+    const source = c.req.param("source");
+    const q = c.req.query("q") || undefined;
+    const limitText = c.req.query("limit");
+    const limit = limitText ? Number(limitText) : undefined;
+    const options = await getDatasource(source, {
+      q,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    return c.json({ ok: true, data: options });
+  });
 
   app.get("/:name", (c) => {
     const name = c.req.param("name");

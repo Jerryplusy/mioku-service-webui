@@ -10,6 +10,7 @@ import type { WebUISettings } from "./types";
 import { ensureAuthConfig, loginWithToken, requireAuth } from "./auth";
 import { getWebUISettings, getSystemOverview, getSaying } from "./system";
 import { CHAT_CONFIG_DIR, CHAT_DATA_DIR, LOGS_DIR, WEBUI_DIST } from "./utils";
+import { initBuiltinDatasources } from "./datasources";
 import {
   createConfigRoutes,
   createWebUISettingsRoutes,
@@ -213,6 +214,7 @@ const webUIService: MiokuService = {
   } as WebUIServiceAPI,
 
   async init() {
+    initBuiltinDatasources();
     ensureAuthConfig();
     fs.mkdirSync(CHAT_CONFIG_DIR, { recursive: true });
     fs.mkdirSync(CHAT_DATA_DIR, { recursive: true });
