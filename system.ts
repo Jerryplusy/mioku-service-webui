@@ -49,6 +49,10 @@ interface MiokiRuntimeConfig {
 const SYSTEM_PLUGIN_NAMES = new Set(["boot", "chat", "help"]);
 const SYSTEM_SERVICE_NAMES = new Set(["ai", "config", "help", "screenshot"]);
 
+function isContainerRuntime(): boolean {
+  return fs.existsSync("/.dockerenv");
+}
+
 function isSystemPluginName(name: string): boolean {
   return SYSTEM_PLUGIN_NAMES.has(String(name || "").trim().toLowerCase());
 }
@@ -59,6 +63,48 @@ function isSystemServiceName(name: string): boolean {
 
 function getTargetRoot(target: ManagedTarget): string {
   return target === "plugin" ? PLUGINS_DIR : SERVICES_DIR;
+}
+
+async function getCurrentBranchName(dir: string): Promise<string> {
+  const branchRes = await runCommand("git", ["branch", "--show-current"], dir);
+  if (branchRes.code !== 0) {
+    return "unknown";
+  }
+  return String(branchRes.stdout || "").trim() || "unknown";
+}
+
+async function getDefaultRemoteBranch(dir: string): Promise<string> {
+  const headRes = await runCommand(
+    "git",
+    ["symbolic-ref", "refs/remotes/origin/HEAD"],
+    dir,
+  );
+  if (headRes.code !== 0) {
+    return "main";
+  }
+  const ref = String(headRes.stdout || "").trim();
+  const branch = ref.split("/").pop() || "main";
+  return branch;
+}
+
+async function resolveMiokuTargetRef(
+  dir: string,
+): Promise<{ currentBranch: string; targetRef: string; targetBranch: string }> {
+  const currentBranch = await getCurrentBranchName(dir);
+  if (currentBranch !== "unknown") {
+    return {
+      currentBranch,
+      targetRef: `origin/${currentBranch}`,
+      targetBranch: currentBranch,
+    };
+  }
+
+  const targetBranch = await getDefaultRemoteBranch(dir);
+  return {
+    currentBranch,
+    targetRef: `origin/${targetBranch}`,
+    targetBranch,
+  };
 }
 
 function deepMerge<T extends Record<string, any>>(
@@ -1084,21 +1130,13 @@ async function fetchLatestMiokuUpdate(
   }
 
   const job = (async () => {
+    const cwd = process.cwd();
     const rootPkg = readRootPackageJson() || {};
     const currentVersion = normalizeVersionSpec(rootPkg?.version || "unknown");
-    const originUrl = (await getGitOriginUrl(process.cwd())) || "";
+    const originUrl = (await getGitOriginUrl(cwd)) || "";
     const repoUrl = originUrl || getRepositoryFromPackage(rootPkg);
     const repo = parseGitHubRepo(repoUrl);
-    const currentBranchRes = await runCommand(
-      "git",
-      ["branch", "--show-current"],
-      process.cwd(),
-    );
-    const currentBranch =
-      currentBranchRes.code === 0
-        ? String(currentBranchRes.stdout || "").trim() || "unknown"
-        : "unknown";
-    const targetRef = "origin/main";
+    const { currentBranch, targetRef, targetBranch } = await resolveMiokuTargetRef(cwd);
 
     const fallback: MiokuUpdateCheckResult = {
       currentVersion,
@@ -1112,10 +1150,12 @@ async function fetchLatestMiokuUpdate(
       checkedAt: Date.now(),
     };
 
-    if (!fs.existsSync(path.join(process.cwd(), ".git"))) {
+    if (!fs.existsSync(path.join(cwd, ".git"))) {
       return {
         ...fallback,
-        error: "当前目录不是 Git 仓库，无法检查 Mioku 更新",
+        error: isContainerRuntime()
+          ? "当前 Docker 容器未挂载 .git 到 /app/.git，无法检查 Mioku 更新"
+          : "当前目录不是 Git 仓库，无法检查 Mioku 更新",
       };
     }
 
@@ -1128,8 +1168,8 @@ async function fetchLatestMiokuUpdate(
 
     const fetchRes = await runCommand(
       "git",
-      ["fetch", "origin", "main"],
-      process.cwd(),
+      ["fetch", "origin", targetBranch],
+      cwd,
     );
 
     if (fetchRes.code !== 0) {
@@ -1142,7 +1182,7 @@ async function fetchLatestMiokuUpdate(
     const compare = await runCommand(
       "git",
       ["rev-list", "--left-right", "--count", `HEAD...${targetRef}`],
-      process.cwd(),
+      cwd,
     );
 
     if (compare.code !== 0) {
@@ -1160,14 +1200,14 @@ async function fetchLatestMiokuUpdate(
     const changelogRes = await runCommand(
       "git",
       ["log", "--oneline", `HEAD..${targetRef}`, "-n", "30"],
-      process.cwd(),
+      cwd,
     );
 
     let latestVersion = currentVersion;
     const remotePkg = await runCommand(
       "git",
       ["show", `${targetRef}:package.json`],
-      process.cwd(),
+      cwd,
     );
     if (remotePkg.code === 0) {
       try {
@@ -1209,21 +1249,31 @@ export async function checkMiokuReleaseUpdate(
 }
 
 export async function updateMiokuFromMain(): Promise<Record<string, any>> {
-  const before = await runCommand("git", ["show", "HEAD:package.json"], process.cwd());
-  const pull = await runCommand("git", ["pull", "origin", "main"], process.cwd());
+  const cwd = process.cwd();
+  if (!fs.existsSync(path.join(cwd, ".git"))) {
+    throw new Error(
+      isContainerRuntime()
+        ? "当前 Docker 容器未挂载 .git 到 /app/.git，无法更新 Mioku"
+        : "当前目录不是 Git 仓库，无法更新 Mioku",
+    );
+  }
+
+  const { targetBranch } = await resolveMiokuTargetRef(cwd);
+  const before = await runCommand("git", ["show", "HEAD:package.json"], cwd);
+  const pull = await runCommand("git", ["pull", "origin", targetBranch], cwd);
 
   if (pull.code !== 0) {
     throw new Error(`git pull 失败: ${pull.stderr || pull.stdout}`);
   }
 
-  const after = await runCommand("git", ["show", "HEAD:package.json"], process.cwd());
+  const after = await runCommand("git", ["show", "HEAD:package.json"], cwd);
   const changed = packageJsonChanged(before.stdout, after.stdout);
 
   let reinstallOutput = "";
   if (changed) {
     const packageManager = packageManagerFromSettings();
     const installCmd = getInstallCommand(packageManager);
-    const install = await runCommand(installCmd.cmd, installCmd.args, process.cwd());
+    const install = await runCommand(installCmd.cmd, installCmd.args, cwd);
     if (install.code !== 0) {
       throw new Error(`依赖安装失败: ${install.stderr || install.stdout}`);
     }

@@ -36,7 +36,7 @@ export function createConfigRoutes() {
 
   app.post("/mioku/update/apply", async (c) => {
     logger.info(`[webui-action] config.mioku.update.apply`, {
-      targetRef: "origin/main",
+      targetRef: "origin/unknown",
     });
     const data = await updateMiokuFromMain();
     return c.json({ ok: true, data });
