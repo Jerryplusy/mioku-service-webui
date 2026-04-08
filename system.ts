@@ -54,11 +54,19 @@ function isContainerRuntime(): boolean {
 }
 
 function isSystemPluginName(name: string): boolean {
-  return SYSTEM_PLUGIN_NAMES.has(String(name || "").trim().toLowerCase());
+  return SYSTEM_PLUGIN_NAMES.has(
+    String(name || "")
+      .trim()
+      .toLowerCase(),
+  );
 }
 
 function isSystemServiceName(name: string): boolean {
-  return SYSTEM_SERVICE_NAMES.has(String(name || "").trim().toLowerCase());
+  return SYSTEM_SERVICE_NAMES.has(
+    String(name || "")
+      .trim()
+      .toLowerCase(),
+  );
 }
 
 function getTargetRoot(target: ManagedTarget): string {
@@ -83,8 +91,7 @@ async function getDefaultRemoteBranch(dir: string): Promise<string> {
     return "main";
   }
   const ref = String(headRes.stdout || "").trim();
-  const branch = ref.split("/").pop() || "main";
-  return branch;
+  return ref.split("/").pop() || "main";
 }
 
 async function resolveMiokuTargetRef(
@@ -304,7 +311,9 @@ function readInstalledWebUIVersion(): string {
     }
   }
 
-  return readPackageVersion(path.join(resolveWebUIProjectDir(), "package.json"));
+  return readPackageVersion(
+    path.join(resolveWebUIProjectDir(), "package.json"),
+  );
 }
 
 function parseGitHubRepo(
@@ -388,7 +397,9 @@ function resolveDistSourceDir(unpackDir: string): string | null {
   return null;
 }
 
-function readReadmeFile(dir: string): { fileName: string; content: string } | null {
+function readReadmeFile(
+  dir: string,
+): { fileName: string; content: string } | null {
   const candidates = [
     "README.md",
     "README.MD",
@@ -457,7 +468,10 @@ interface MiokuUpdateCheckResult {
 }
 
 const MANAGED_UPDATE_CACHE_TTL_MS = 120_000;
-const managedPackageUpdateCache = new Map<string, ManagedPackageUpdateCacheEntry>();
+const managedPackageUpdateCache = new Map<
+  string,
+  ManagedPackageUpdateCacheEntry
+>();
 const managedOverviewRefreshInFlight = new Map<ManagedTarget, Promise<void>>();
 const WEBUI_UPDATE_CACHE_TTL_MS = 60_000;
 let webuiUpdateCache: WebUIUpdateCheckResult | null = null;
@@ -467,7 +481,10 @@ const MIOKU_UPDATE_CACHE_TTL_MS = 60_000;
 let miokuUpdateCache: MiokuUpdateCheckResult | null = null;
 let miokuUpdateCheckInFlight: Promise<MiokuUpdateCheckResult> | null = null;
 
-function makeManagedUpdateCacheKey(target: ManagedTarget, name: string): string {
+function makeManagedUpdateCacheKey(
+  target: ManagedTarget,
+  name: string,
+): string {
   return `${target}:${name}`;
 }
 
@@ -475,7 +492,10 @@ function getCachedManagedUpdateInfo(
   target: ManagedTarget,
   name: string,
 ): ManagedPackageUpdateCacheEntry | null {
-  return managedPackageUpdateCache.get(makeManagedUpdateCacheKey(target, name)) || null;
+  return (
+    managedPackageUpdateCache.get(makeManagedUpdateCacheKey(target, name)) ||
+    null
+  );
 }
 
 function setCachedManagedUpdateInfo(
@@ -489,7 +509,9 @@ function setCachedManagedUpdateInfo(
   });
 }
 
-function isManagedUpdateCacheFresh(entry: ManagedPackageUpdateCacheEntry | null): boolean {
+function isManagedUpdateCacheFresh(
+  entry: ManagedPackageUpdateCacheEntry | null,
+): boolean {
   if (!entry) return false;
   return Date.now() - entry.checkedAt < MANAGED_UPDATE_CACHE_TTL_MS;
 }
@@ -514,7 +536,9 @@ async function refreshManagedUpdatesInBackground(
     }
 
     try {
-      const updateInfo = await getManagedPackageUpdateInfo(String(item.path || ""));
+      const updateInfo = await getManagedPackageUpdateInfo(
+        String(item.path || ""),
+      );
       setCachedManagedUpdateInfo(target, name, updateInfo);
     } catch (error: any) {
       setCachedManagedUpdateInfo(target, name, {
@@ -542,9 +566,11 @@ function scheduleManagedUpdatesRefresh(
 
   if (!shouldRefresh) return;
 
-  const job = refreshManagedUpdatesInBackground(target, packages).finally(() => {
-    managedOverviewRefreshInFlight.delete(target);
-  });
+  const job = refreshManagedUpdatesInBackground(target, packages).finally(
+    () => {
+      managedOverviewRefreshInFlight.delete(target);
+    },
+  );
   managedOverviewRefreshInFlight.set(target, job);
 }
 
@@ -865,8 +891,7 @@ export async function getManagedPackageDetail(
       description: pkg?.description || "",
       hasGit: fs.existsSync(path.join(dir, ".git")),
       isSystemPlugin: target === "plugin" ? isSystemPluginName(name) : false,
-      isSystemService:
-        target === "service" ? isSystemServiceName(name) : false,
+      isSystemService: target === "service" ? isSystemServiceName(name) : false,
       repository: repositoryFromPkg,
       originUrl,
       homepage: pkg?.homepage || "",
@@ -903,7 +928,9 @@ export async function changeManagedPackageRepo(
     dir,
   );
   if (setRemote.code !== 0) {
-    throw new Error(`更新仓库地址失败: ${setRemote.stderr || setRemote.stdout}`);
+    throw new Error(
+      `更新仓库地址失败: ${setRemote.stderr || setRemote.stdout}`,
+    );
   }
 
   const packagePath = path.join(dir, "package.json");
@@ -983,8 +1010,12 @@ export async function updateAllManagedPackages(input: {
     }
   }
 
-  const updatedCount = results.filter((item) => item.ok && !item.skipped).length;
-  const failedCount = results.filter((item) => !item.ok && !item.skipped).length;
+  const updatedCount = results.filter(
+    (item) => item.ok && !item.skipped,
+  ).length;
+  const failedCount = results.filter(
+    (item) => !item.ok && !item.skipped,
+  ).length;
   const skippedCount = results.filter((item) => item.skipped).length;
 
   return {
@@ -997,7 +1028,9 @@ export async function updateAllManagedPackages(input: {
   };
 }
 
-function pickWebUIDistAsset(assets: WebUIReleaseAsset[]): WebUIReleaseAsset | null {
+function pickWebUIDistAsset(
+  assets: WebUIReleaseAsset[],
+): WebUIReleaseAsset | null {
   const zipAssets = assets.filter((asset) =>
     /\.zip$/i.test(String(asset?.name || "")),
   );
@@ -1077,7 +1110,8 @@ async function fetchLatestWebUIUpdate(
       : [];
     const distAsset = pickWebUIDistAsset(assets);
     const hasUpdates =
-      latestVersion !== "unknown" && isVersionNewer(latestVersion, currentVersion);
+      latestVersion !== "unknown" &&
+      isVersionNewer(latestVersion, currentVersion);
 
     return {
       currentVersion,
@@ -1136,7 +1170,8 @@ async function fetchLatestMiokuUpdate(
     const originUrl = (await getGitOriginUrl(cwd)) || "";
     const repoUrl = originUrl || getRepositoryFromPackage(rootPkg);
     const repo = parseGitHubRepo(repoUrl);
-    const { currentBranch, targetRef, targetBranch } = await resolveMiokuTargetRef(cwd);
+    const { currentBranch, targetRef, targetBranch } =
+      await resolveMiokuTargetRef(cwd);
 
     const fallback: MiokuUpdateCheckResult = {
       currentVersion,
@@ -1294,7 +1329,9 @@ export async function updateMiokuFromMain(): Promise<Record<string, any>> {
   };
 }
 
-export async function updateWebUIDistFromRelease(): Promise<Record<string, any>> {
+export async function updateWebUIDistFromRelease(): Promise<
+  Record<string, any>
+> {
   if (webuiUpdatingInFlight) {
     return webuiUpdatingInFlight;
   }
