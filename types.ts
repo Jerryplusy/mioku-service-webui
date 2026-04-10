@@ -1,5 +1,7 @@
+// 管理类型
 export type ManagedTarget = "plugin" | "service";
 
+// 包管理器
 export type PackageManager = "npm" | "pnpm" | "bun";
 
 export interface WebUISettings {
