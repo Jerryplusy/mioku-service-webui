@@ -91,18 +91,37 @@ export function createPluginConfigRoutes() {
     const overview = plugins
       .map((name) => {
         const configDir = path.join(process.cwd(), "config", name);
-        const hasConfigs = fs.existsSync(configDir) && fs.readdirSync(configDir).filter((f) => f.endsWith(".json")).length > 0;
         const manifest = loadPluginConfigPage(name);
+        const existingConfigFiles =
+          fs.existsSync(configDir)
+            ? fs
+                .readdirSync(configDir)
+                .filter((f) => f.endsWith(".json"))
+                .map((f) => f.replace(".json", ""))
+            : [];
+        const declaredConfigFiles = manifest
+          ? Array.from(
+              new Set(
+                (manifest.fields || [])
+                  .map((field) => String(field.key || ""))
+                  .filter((key) => key.includes("."))
+                  .map((key) => key.split(".")[0]),
+              ),
+            )
+          : [];
+        const configFiles = Array.from(
+          new Set([...existingConfigFiles, ...declaredConfigFiles]),
+        );
 
         return {
           name,
           title: manifest?.title || name,
           description: manifest?.description,
           hasPage: manifest?.hasCustomPage || false,
-          configFiles: hasConfigs ? fs.readdirSync(configDir).filter((f) => f.endsWith(".json")).map((f) => f.replace(".json", "")) : [],
+          configFiles,
         };
       })
-      .filter((p) => p.hasPage && p.configFiles.length > 0);
+      .filter((p) => p.hasPage);
 
     return c.json({ ok: true, data: overview });
   });
